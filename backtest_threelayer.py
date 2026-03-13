@@ -1,8 +1,9 @@
 """
-ThreeLayerEA バックテスター — XAUUSD 3層フィルター戦略
+ThreeLayerEA バックテスター v2.0 — XAUUSD 3層フィルター戦略
 第1層: 一目均衡表（環境認識）
 第2層: UT Bot Alerts + SMC（エントリー）
 第3層: RSI + ATR（フィルター）
+v2.0: ボラティリティレジーム検出, セッションフィルタ, モメンタムチェック, 部分決済
 """
 
 import pandas as pd
@@ -24,6 +25,7 @@ class ThreeLayerConfig:
 
     # 第2層: UT Bot
     UT_KEY_VALUE = 2.0         # ★偽シグナル削減
+    UT_HIGH_VOL_KEY = 2.5      # ★高ボラ時キー値
     UT_ATR_PERIOD = 10
 
     # 第2層: SMC
@@ -36,6 +38,23 @@ class ThreeLayerConfig:
     RSI_OS = 30.0
     ATR_PERIOD = 14
     ATR_MIN_THRESHOLD = 2.0
+
+    # ボラティリティレジーム
+    VOL_REGIME_PERIOD = 50
+    VOL_REGIME_LOW = 0.7       # ATR/ATR_avg < 0.7 → スキップ
+    VOL_REGIME_HIGH = 1.5      # ATR/ATR_avg > 1.5 → 高ボラ
+    HIGH_VOL_SL_BONUS = 0.5    # 高ボラ時SL_ATR_MULTI加算
+
+    # セッションフィルタ
+    USE_SESSION_FILTER = True   # 非活発時間帯スキップ
+
+    # モメンタムチェック
+    USE_MOMENTUM = True         # 逆方向モメンタム抑制
+
+    # 部分決済
+    USE_PARTIAL_CLOSE = True
+    PARTIAL_CLOSE_RATIO = 0.5   # 50%決済
+    PARTIAL_TP_RATIO = 0.5      # TP距離の50%で発動
 
     # 資金管理
     RISK_PERCENT = 1.0         # ★DD抑制
@@ -93,8 +112,9 @@ class UTBot:
         self.key_value = key_value
         self.trail_stop = 0.0
 
-    def update(self, close_cur, close_prev, atr_cur):
-        n_loss = atr_cur * self.key_value
+    def update(self, close_cur, close_prev, atr_cur, key_value=None):
+        kv = key_value if key_value is not None else self.key_value
+        n_loss = atr_cur * kv
         prev_trail = self.trail_stop
 
         if close_cur > prev_trail and close_prev > prev_trail:
@@ -246,15 +266,21 @@ class ThreeLayerBacktester:
         df["atr"] = calc_atr(df["High"], df["Low"], df["Close"], cfg.ATR_PERIOD)
         df["ut_atr"] = calc_atr(df["High"], df["Low"], df["Close"], cfg.UT_ATR_PERIOD)
 
+        # ボラティリティレジーム: ATR平均
+        df["atr_avg"] = df["atr"].rolling(window=cfg.VOL_REGIME_PERIOD).mean()
+
         # ウォームアップ
-        warmup = max(cfg.ICHI_SENKOU_B + cfg.ICHI_KIJUN, cfg.SMC_LOOKBACK + cfg.SMC_SWING_LEN + 10, 100)
+        warmup = max(cfg.ICHI_SENKOU_B + cfg.ICHI_KIJUN, cfg.SMC_LOOKBACK + cfg.SMC_SWING_LEN + 10,
+                     cfg.VOL_REGIME_PERIOD + 10, 100)
         total_bars = len(df)
 
-        print(f"\n📊 バックテスト開始: {df.index[warmup].date()} → {df.index[-1].date()}")
+        print(f"\n📊 バックテスト開始 v2.0: {df.index[warmup].date()} → {df.index[-1].date()}")
         print(f"   バー数: {total_bars:,}（ウォームアップ: {warmup}）")
         print(f"   設定: Risk={cfg.RISK_PERCENT}% SL=ATR×{cfg.SL_ATR_MULTI} TP=ATR×{cfg.TP_ATR_MULTI}")
         print(f"   一目: {cfg.ICHI_TENKAN}/{cfg.ICHI_KIJUN}/{cfg.ICHI_SENKOU_B}")
-        print(f"   UT Bot: Key={cfg.UT_KEY_VALUE} ATR={cfg.UT_ATR_PERIOD}")
+        print(f"   UT Bot: Key={cfg.UT_KEY_VALUE} HighVolKey={cfg.UT_HIGH_VOL_KEY} ATR={cfg.UT_ATR_PERIOD}")
+        print(f"   VolRegime: Period={cfg.VOL_REGIME_PERIOD} Low={cfg.VOL_REGIME_LOW} High={cfg.VOL_REGIME_HIGH}")
+        print(f"   Session={cfg.USE_SESSION_FILTER} Momentum={cfg.USE_MOMENTUM} PartialClose={cfg.USE_PARTIAL_CLOSE}")
 
         ut_bot = UTBot(cfg.UT_KEY_VALUE)
         # UT Bot初期化（ウォームアップ期間で状態を構築）
@@ -271,7 +297,7 @@ class ThreeLayerBacktester:
             ch = df["High"].iloc[i]
             cl = df["Low"].iloc[i]
 
-            # ポジション管理
+            # ポジション管理（部分決済含む）
             self._manage_position(ch, cl, cc, ct, i)
 
             # 必要値取得
@@ -279,15 +305,42 @@ class ThreeLayerBacktester:
             sb = df["senkou_b"].iloc[i]
             rsi_val = df["rsi"].iloc[i]
             atr_val = df["atr"].iloc[i]
+            atr_avg_val = df["atr_avg"].iloc[i]
             ut_atr_val = df["ut_atr"].iloc[i]
             close_prev = df["Close"].iloc[i - 1]
 
-            if pd.isna(sa) or pd.isna(sb) or pd.isna(rsi_val) or pd.isna(atr_val) or pd.isna(ut_atr_val):
+            if pd.isna(sa) or pd.isna(sb) or pd.isna(rsi_val) or pd.isna(atr_val) or pd.isna(ut_atr_val) or pd.isna(atr_avg_val):
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
                 continue
 
             # ★ SL後クールダウン
             if i < self.cooldown_until:
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
+                continue
+
+            # === v2.0: セッションフィルタ ===
+            if cfg.USE_SESSION_FILTER:
+                hour = ct.hour if hasattr(ct, 'hour') else pd.Timestamp(ct).hour
+                dow = ct.dayofweek if hasattr(ct, 'dayofweek') else pd.Timestamp(ct).dayofweek
+                # 非活発時間帯スキップ: 22:00-2:00 および 金曜18時以降
+                if hour >= 22 or hour < 2 or (dow == 4 and hour >= 18):
+                    # UT Botの状態は更新し続ける
+                    ut_bot.update(cc, close_prev, ut_atr_val)
+                    self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
+                    continue
+
+            # === v2.0: ボラティリティレジーム検出 ===
+            vol_ratio = atr_val / atr_avg_val if atr_avg_val > 0 else 1.0
+            if vol_ratio < cfg.VOL_REGIME_LOW:
+                vol_regime = 0  # 低ボラ → スキップ
+            elif vol_ratio > cfg.VOL_REGIME_HIGH:
+                vol_regime = 2  # 高ボラ
+            else:
+                vol_regime = 1  # 通常
+
+            # 低ボラ時スキップ
+            if vol_regime == 0:
+                ut_bot.update(cc, close_prev, ut_atr_val)
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
                 continue
 
@@ -298,11 +351,13 @@ class ThreeLayerBacktester:
             allow_sell = cc < cloud_lower
 
             if not allow_buy and not allow_sell:
+                ut_bot.update(cc, close_prev, ut_atr_val)
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
                 continue
 
-            # === 第2層: UT Bot ===
-            ut_buy, ut_sell = ut_bot.update(cc, close_prev, ut_atr_val)
+            # === 第2層: UT Bot (高ボラ時はキー値変更) ===
+            ut_key = cfg.UT_HIGH_VOL_KEY if vol_regime == 2 else None
+            ut_buy, ut_sell = ut_bot.update(cc, close_prev, ut_atr_val, key_value=ut_key)
 
             # === 第2層: SMC ===
             lookback_start = max(0, i - cfg.SMC_LOOKBACK - cfg.SMC_SWING_LEN - 1)
@@ -316,10 +371,23 @@ class ThreeLayerBacktester:
             rsi_allow_sell = rsi_val > cfg.RSI_OS
             atr_allow = atr_val >= cfg.ATR_MIN_THRESHOLD
 
+            # === v2.0: モメンタムチェック ===
+            momentum_buy = True
+            momentum_sell = True
+            if cfg.USE_MOMENTUM and i >= 2:
+                close_i2 = df["Close"].iloc[i - 2]
+                mom_threshold = atr_val * 0.1
+                # BUY: 価格が強く下落していないこと
+                momentum_buy = (cc - close_i2) > -mom_threshold
+                # SELL: 価格が強く上昇していないこと
+                momentum_sell = (close_i2 - cc) > -mom_threshold
+
             # === エントリー（全AND） ===
             if self.open_pos is None:
-                if allow_buy and ut_buy and smc_buy and rsi_allow_buy and atr_allow:
-                    sl_dist = atr_val * cfg.SL_ATR_MULTI
+                if allow_buy and ut_buy and smc_buy and rsi_allow_buy and atr_allow and momentum_buy:
+                    # 高ボラ時SLボーナス
+                    sl_multi = cfg.SL_ATR_MULTI + (cfg.HIGH_VOL_SL_BONUS if vol_regime == 2 else 0)
+                    sl_dist = atr_val * sl_multi
                     tp_dist = atr_val * cfg.TP_ATR_MULTI
                     entry = cc
                     sl = entry - sl_dist
@@ -330,10 +398,13 @@ class ThreeLayerBacktester:
                             "direction": "BUY", "entry": entry, "sl": sl, "tp": tp,
                             "lot": lot, "open_time": ct,
                             "rsi": rsi_val, "atr": atr_val,
+                            "partial_closed": False, "original_lot": lot,
+                            "sl_dist": sl_dist, "tp_dist": tp_dist,
                         }
 
-                elif allow_sell and ut_sell and smc_sell and rsi_allow_sell and atr_allow:
-                    sl_dist = atr_val * cfg.SL_ATR_MULTI
+                elif allow_sell and ut_sell and smc_sell and rsi_allow_sell and atr_allow and momentum_sell:
+                    sl_multi = cfg.SL_ATR_MULTI + (cfg.HIGH_VOL_SL_BONUS if vol_regime == 2 else 0)
+                    sl_dist = atr_val * sl_multi
                     tp_dist = atr_val * cfg.TP_ATR_MULTI
                     entry = cc
                     sl = entry + sl_dist
@@ -344,6 +415,8 @@ class ThreeLayerBacktester:
                             "direction": "SELL", "entry": entry, "sl": sl, "tp": tp,
                             "lot": lot, "open_time": ct,
                             "rsi": rsi_val, "atr": atr_val,
+                            "partial_closed": False, "original_lot": lot,
+                            "sl_dist": sl_dist, "tp_dist": tp_dist,
                         }
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized(cc)})
@@ -359,16 +432,86 @@ class ThreeLayerBacktester:
         if self.open_pos is None:
             return
         pos = self.open_pos
+        cfg = self.cfg
+
         if pos["direction"] == "BUY":
+            # SL/TP判定
             if low <= pos["sl"]:
                 self._close(pos["sl"], time, "SL", bar_idx)
+                return
             elif high >= pos["tp"]:
                 self._close(pos["tp"], time, "TP", bar_idx)
-        else:
+                return
+
+            # v2.0: 部分決済チェック
+            if cfg.USE_PARTIAL_CLOSE and not pos.get("partial_closed", False):
+                profit_dist = close - pos["entry"]
+                tp_dist = pos.get("tp_dist", pos["tp"] - pos["entry"])
+                if profit_dist >= tp_dist * cfg.PARTIAL_TP_RATIO:
+                    self._partial_close(close, time, bar_idx)
+
+        else:  # SELL
             if high >= pos["sl"]:
                 self._close(pos["sl"], time, "SL", bar_idx)
+                return
             elif low <= pos["tp"]:
                 self._close(pos["tp"], time, "TP", bar_idx)
+                return
+
+            # v2.0: 部分決済チェック
+            if cfg.USE_PARTIAL_CLOSE and not pos.get("partial_closed", False):
+                profit_dist = pos["entry"] - close
+                tp_dist = pos.get("tp_dist", pos["entry"] - pos["tp"])
+                if profit_dist >= tp_dist * cfg.PARTIAL_TP_RATIO:
+                    self._partial_close(close, time, bar_idx)
+
+    def _partial_close(self, exit_price, time, bar_idx=0):
+        """v2.0: 部分決済 — 50%決済しSLをブレイクイーブンに移動"""
+        pos = self.open_pos
+        if pos is None:
+            return
+        cfg = self.cfg
+        pt = cfg.POINT
+
+        # 決済するロット数
+        close_lot = round(pos["lot"] * cfg.PARTIAL_CLOSE_RATIO, 2)
+        if close_lot < cfg.MIN_LOT:
+            return
+
+        # 部分決済のPnL計算
+        if pos["direction"] == "BUY":
+            pnl_pts = (exit_price - pos["entry"]) / pt
+        else:
+            pnl_pts = (pos["entry"] - exit_price) / pt
+
+        pnl_usd = pnl_pts * pt * cfg.CONTRACT_SIZE * close_lot
+        pnl_jpy = pnl_usd * 150.0
+
+        self.balance += pnl_jpy
+        self.peak_balance = max(self.peak_balance, self.balance)
+
+        # HALF取引を記録
+        self.trades.append({
+            "open_time": pos["open_time"], "close_time": time,
+            "direction": pos["direction"],
+            "entry": round(pos["entry"], 2), "exit": round(exit_price, 2),
+            "lot": close_lot,
+            "pnl_pts": round(pnl_pts, 1),
+            "pnl_usd": round(pnl_usd, 2),
+            "pnl_jpy": round(pnl_jpy, 0),
+            "balance": round(self.balance, 0),
+            "reason": "HALF",
+            "rsi": round(pos["rsi"], 1),
+            "atr": round(pos["atr"], 2),
+        })
+
+        # 残りロットを更新、SLをブレイクイーブンに移動
+        remaining_lot = round(pos["lot"] - close_lot, 2)
+        if remaining_lot < cfg.MIN_LOT:
+            remaining_lot = cfg.MIN_LOT
+        pos["lot"] = remaining_lot
+        pos["sl"] = pos["entry"]  # ブレイクイーブン
+        pos["partial_closed"] = True
 
     def _close(self, exit_price, time, reason, bar_idx=0):
         pos = self.open_pos
@@ -501,7 +644,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print("📊 ThreeLayerEA [XAUUSD] バックテスト結果（直近半年）")
+        print("📊 ThreeLayerEA v2.0 [XAUUSD] バックテスト結果（直近半年）")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "月別":

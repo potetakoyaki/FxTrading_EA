@@ -1,6 +1,6 @@
 """
-AntigravityMTF EA USDJPY — バックテスター（直近1年）
-修正版ロジック: H1MA方向判定、RSI排他的範囲、チャネル確定足使用
+AntigravityMTF EA USDJPY v2.0 — バックテスター（直近1年）
+ATR動的SL/TP + ボラティリティレジーム + セッション + モメンタム + 半利確
 """
 
 import pandas as pd
@@ -13,22 +13,41 @@ warnings.filterwarnings("ignore")
 
 class USDJPYConfig:
     SYMBOL = "USDJPY=X"
-    INITIAL_BALANCE = 100_000  # 10万円
-    RISK_PERCENT = 0.4         # 複利0.4%
-    SL_PIPS = 25               # ★ノイズ耐性向上
-    TP_PIPS = 50               # RR 1:2
-    TRAILING_START = 40        # ★TP直前でのみトレーリング
-    TRAILING_STEP = 10         # ★利確の補助
-    BREAKEVEN_PIPS = 25        # ★TP半分で建値移動
+    INITIAL_BALANCE = 100_000
+    RISK_PERCENT = 0.5         # ATR-SLで自動調整されるため少し引き上げ
     MAX_POSITIONS = 1
-    MIN_SCORE = 7              # ★さらに引き上げ（高品質のみ）
-    COOLDOWN_BARS = 16         # SL後16本(=4時間)エントリー禁止
+    MIN_SCORE = 7              # 最低スコア 7/12
+    COOLDOWN_BARS = 16         # SL後16本(=4時間)
     MAX_SPREAD_PIPS = 3.0
-    PIP_VALUE = 0.01           # USDJPYの1pip
+    PIP_VALUE = 0.01
     MAX_DD_PERCENT = 6.0
     DD_HALF_RISK = 2.5
     MAX_LOT = 0.50
     MIN_LOT = 0.01
+
+    # ATR動的SL/TP
+    ATR_PERIOD = 14
+    SL_ATR_MULTI = 1.5
+    TP_ATR_MULTI = 3.0
+    TRAIL_ATR_MULTI = 1.0
+    BE_ATR_MULTI = 1.5
+    MIN_SL_PIPS = 10
+    MAX_SL_PIPS = 50
+
+    # ボラティリティレジーム
+    VOL_REGIME_PERIOD = 50
+    VOL_REGIME_LOW = 0.7
+    VOL_REGIME_HIGH = 1.5
+    HIGH_VOL_SL_BONUS = 0.5
+
+    # セッション・モメンタム
+    USE_SESSION_BONUS = True
+    USE_MOMENTUM = True
+
+    # 半利確
+    USE_PARTIAL_CLOSE = True
+    PARTIAL_CLOSE_RATIO = 0.5
+    PARTIAL_TP_RATIO = 0.5
 
     H4_MA_FAST = 20
     H4_MA_SLOW = 50
@@ -80,6 +99,13 @@ def calc_adx(high, low, close, period=14):
     adx = dx.rolling(window=period).mean()
     return adx, plus_di, minus_di
 
+def calc_atr(high, low, close, period=14):
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
 def calc_bb(series, period, deviation):
     sma = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
@@ -88,7 +114,6 @@ def calc_bb(series, period, deviation):
 def calc_channel_signal(close_series, lookback=40):
     if len(close_series) < lookback + 1:
         return 0
-    # 確定足を使用（最後の1本を除外）
     y = close_series[-(lookback+1):-1].values
     if len(y) < lookback:
         return 0
@@ -112,30 +137,26 @@ def calc_channel_signal(close_series, lookback=40):
 # データ取得
 # ============================================================
 def fetch_usdjpy_data(months=12):
-    print(f"📥 USDJPY 取得中（{months}ヶ月分）...")
+    print(f"USDJPY data ({months}months)...")
     end = datetime.now()
     start = end - timedelta(days=months * 30 + 90)
 
     t = yf.Ticker("USDJPY=X")
 
-    # 1時間足を取得
     h1_raw = t.history(start=start, end=end, interval="1h")
     if h1_raw.empty:
-        print("❌ 1時間足取得失敗、日足から生成")
+        print("H1 failed, using daily")
         daily = t.history(start=start, end=end, interval="1d")
         if daily.empty:
-            print("❌ データ取得失敗")
             return None, None, None
         return _generate_from_daily(daily, months)
 
-    print(f"   H1: {len(h1_raw)}本 ({h1_raw.index[0]} ~ {h1_raw.index[-1]})")
+    print(f"   H1: {len(h1_raw)} bars ({h1_raw.index[0].date()} ~ {h1_raw.index[-1].date()})")
 
-    # H4を生成
     h4_df = h1_raw.resample("4h").agg({
         "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
     }).dropna()
 
-    # M15を生成（H1から補間）
     m15_list = []
     for idx, row in h1_raw.iterrows():
         o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
@@ -155,8 +176,8 @@ def fetch_usdjpy_data(months=12):
     cutoff_ts = pd.Timestamp(cutoff, tz=m15_df.index.tz) if m15_df.index.tz else pd.Timestamp(cutoff)
     m15_df = m15_df[m15_df.index >= cutoff_ts]
 
-    print(f"   H4: {len(h4_df)}本 / M15: {len(m15_df)}本")
-    print(f"   バックテスト期間: {m15_df.index[0].date()} ~ {m15_df.index[-1].date()}")
+    print(f"   H4: {len(h4_df)} / M15: {len(m15_df)} bars")
+    print(f"   Period: {m15_df.index[0].date()} ~ {m15_df.index[-1].date()}")
 
     return h4_df, h1_raw, m15_df
 
@@ -189,7 +210,7 @@ def _generate_from_daily(daily, months):
 
 
 # ============================================================
-# バックテストエンジン（USDJPY用・修正版ロジック）
+# バックテストエンジン v2.0
 # ============================================================
 class USDJPYBacktester:
     def __init__(self, cfg):
@@ -200,6 +221,7 @@ class USDJPYBacktester:
         self.open_positions = []
         self.peak_balance = cfg.INITIAL_BALANCE
         self.cooldown_until = 0
+        self.partial_closed = set()
 
     def run(self, h4_df, h1_df, m15_df):
         cfg = self.cfg
@@ -222,18 +244,27 @@ class USDJPYBacktester:
         m15_df["ma_fast"] = calc_ema(m15_df["Close"], cfg.M15_MA_FAST)
         m15_df["ma_slow"] = calc_ema(m15_df["Close"], cfg.M15_MA_SLOW)
 
+        # ATR計算（M15足）
+        m15_df["atr"] = calc_atr(m15_df["High"], m15_df["Low"], m15_df["Close"], cfg.ATR_PERIOD)
+        # ATR平均（ボラレジーム用）
+        m15_df["atr_avg"] = m15_df["atr"].rolling(window=cfg.VOL_REGIME_PERIOD, min_periods=cfg.VOL_REGIME_PERIOD).mean()
+
         total_bars = len(m15_df)
-        print(f"\n📊 バックテスト開始: {m15_df.index[0].date()} → {m15_df.index[-1].date()}")
-        print(f"   M15バー数: {total_bars:,}")
-        print(f"   設定: Risk={cfg.RISK_PERCENT}% SL={cfg.SL_PIPS}pips TP={cfg.TP_PIPS}pips MinScore={cfg.MIN_SCORE}")
+        print(f"\nBacktest: {m15_df.index[0].date()} -> {m15_df.index[-1].date()}")
+        print(f"   M15 bars: {total_bars:,}")
+        print(f"   v2.0: Risk={cfg.RISK_PERCENT}% SL=ATRx{cfg.SL_ATR_MULTI} TP=ATRx{cfg.TP_ATR_MULTI} MinScore={cfg.MIN_SCORE}")
+        print(f"   VolRegime: Low<{cfg.VOL_REGIME_LOW} High>{cfg.VOL_REGIME_HIGH}")
+        print(f"   PartialClose={cfg.USE_PARTIAL_CLOSE} Session={cfg.USE_SESSION_BONUS} Momentum={cfg.USE_MOMENTUM}")
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
             cc = m15_df["Close"].iloc[i]
             ch = m15_df["High"].iloc[i]
             cl = m15_df["Low"].iloc[i]
+            cur_atr = m15_df["atr"].iloc[i] if pd.notna(m15_df["atr"].iloc[i]) else None
+            cur_atr_avg = m15_df["atr_avg"].iloc[i] if pd.notna(m15_df["atr_avg"].iloc[i]) else None
 
-            self._manage_positions(ch, cl, cc, ct, i)
+            self._manage_positions(ch, cl, cc, ct, i, cur_atr)
 
             if self.balance > self.peak_balance:
                 self.peak_balance = self.balance
@@ -249,9 +280,24 @@ class USDJPYBacktester:
             if len(self.open_positions) >= cfg.MAX_POSITIONS:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
-
-            # ★ SL後クールダウン
             if i < self.cooldown_until:
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                continue
+
+            # ★ ボラティリティレジーム判定
+            if cur_atr is None or cur_atr <= 0:
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                continue
+
+            vol_regime = 1  # default: normal
+            if cur_atr_avg is not None and cur_atr_avg > 0:
+                ratio = cur_atr / cur_atr_avg
+                if ratio < cfg.VOL_REGIME_LOW:
+                    vol_regime = 0  # low vol -> skip
+                elif ratio > cfg.VOL_REGIME_HIGH:
+                    vol_regime = 2  # high vol
+
+            if vol_regime == 0:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
@@ -271,25 +317,25 @@ class USDJPYBacktester:
             m15_curr = m15_df.iloc[i]
             m15_prev = m15_df.iloc[i - 1]
 
-            # ──── スコアリング（修正版ロジック） ────
+            # ──── スコアリング v2.0 (max 12 points) ────
             buy_score = 0
             sell_score = 0
 
-            # 1. H4 トレンド（3点）
+            # 1. H4 Trend (3pt)
             if pd.notna(h4_row.get("adx")) and h4_row["adx"] >= cfg.H4_ADX_THRESHOLD:
                 if h4_row["ma_fast"] > h4_row["ma_slow"] and h4_row["plus_di"] > h4_row["minus_di"]:
                     buy_score += 3
                 elif h4_row["ma_fast"] < h4_row["ma_slow"] and h4_row["minus_di"] > h4_row["plus_di"]:
                     sell_score += 3
 
-            # 2. H1 MA方向（2点）— 修正版: 方向判定のみ（クロス不要）
+            # 2. H1 MA direction (2pt)
             if pd.notna(h1_curr["ma_fast"]) and pd.notna(h1_curr["ma_slow"]):
                 if h1_curr["ma_fast"] > h1_curr["ma_slow"]:
                     buy_score += 2
                 elif h1_curr["ma_fast"] < h1_curr["ma_slow"]:
                     sell_score += 2
 
-            # 3. H1 RSI（1点）— 修正版: 排他的範囲
+            # 3. H1 RSI (1pt)
             if pd.notna(h1_curr["rsi"]):
                 rsi_val = h1_curr["rsi"]
                 if 40 < rsi_val < 60:
@@ -300,7 +346,7 @@ class USDJPYBacktester:
                 elif 35 < rsi_val <= 40:
                     sell_score += 1
 
-            # 4. H1 BB バウンス（1点）
+            # 4. H1 BB (1pt)
             if pd.notna(h1_curr.get("bb_upper")) and pd.notna(h1_curr.get("bb_lower")):
                 bw = h1_curr["bb_upper"] - h1_curr["bb_lower"]
                 if bw > 0:
@@ -310,7 +356,7 @@ class USDJPYBacktester:
                     if bp > 0.8 and h1_curr["Close"] < h1_prev["Close"]:
                         sell_score += 1
 
-            # 5. M15 MAクロス（2点）— クロス直後のみ
+            # 5. M15 MA cross (2pt)
             if pd.notna(m15_curr["ma_fast"]) and pd.notna(m15_curr["ma_slow"]):
                 fast_above = m15_curr["ma_fast"] > m15_curr["ma_slow"]
                 prev_fast_above = m15_prev["ma_fast"] > m15_prev["ma_slow"] if pd.notna(m15_prev["ma_fast"]) else None
@@ -319,7 +365,7 @@ class USDJPYBacktester:
                 elif not fast_above and prev_fast_above is True:
                     sell_score += 2
 
-            # 6. チャネル回帰（1点）— 確定足使用
+            # 6. Channel regression (1pt)
             h1_closes = h1_df[h1_mask]["Close"]
             cs = calc_channel_signal(h1_closes, 40)
             if cs == 1:
@@ -327,30 +373,60 @@ class USDJPYBacktester:
             elif cs == -1:
                 sell_score += 1
 
-            # ──── 動的スコア防壁 ────
+            # 7. ★ Momentum (1pt) - M15 close[1] vs close[3]
+            if cfg.USE_MOMENTUM and i >= 3:
+                close_1 = m15_df["Close"].iloc[i]
+                close_3 = m15_df["Close"].iloc[i - 2]
+                threshold = cfg.PIP_VALUE * 3  # 3 pips threshold
+                if close_1 - close_3 > threshold:
+                    buy_score += 1
+                elif close_3 - close_1 > threshold:
+                    sell_score += 1
+
+            # 8. ★ Session bonus (1pt) - Tokyo/London early for USDJPY
+            if cfg.USE_SESSION_BONUS:
+                if (0 <= hour < 8) or (8 <= hour < 11):
+                    buy_score += 1
+                    sell_score += 1
+
+            # Dynamic score barrier
             current_min_score = cfg.MIN_SCORE
             if current_dd >= 20.0:
-                current_min_score = 9
+                current_min_score = 10
             elif current_dd >= 15.0:
-                current_min_score = 8
+                current_min_score = 9
             elif current_dd >= 10.0:
-                current_min_score = 7
+                current_min_score = 8
 
-            # ──── エントリー ────
+            # ★ Dynamic SL/TP (ATR-based)
+            sl_multi = cfg.SL_ATR_MULTI
+            if vol_regime == 2:
+                sl_multi += cfg.HIGH_VOL_SL_BONUS
+
+            sl_dist = cur_atr * sl_multi
+            tp_dist = cur_atr * cfg.TP_ATR_MULTI
+
+            # Clamp SL to min/max
+            min_sl = cfg.MIN_SL_PIPS * cfg.PIP_VALUE
+            max_sl = cfg.MAX_SL_PIPS * cfg.PIP_VALUE
+            sl_dist = max(min_sl, min(max_sl, sl_dist))
+            tp_dist = max(sl_dist * 1.5, tp_dist)  # min RR 1:1.5
+
+            # Entry
             if buy_score >= current_min_score and buy_score > sell_score:
-                self._open_trade("BUY", cc, ct, buy_score, current_dd)
+                self._open_trade("BUY", cc, ct, buy_score, current_dd, sl_dist, tp_dist, cur_atr, vol_regime)
             elif sell_score >= current_min_score and sell_score > buy_score:
-                self._open_trade("SELL", cc, ct, sell_score, current_dd)
+                self._open_trade("SELL", cc, ct, sell_score, current_dd, sl_dist, tp_dist, cur_atr, vol_regime)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
 
         fc = m15_df["Close"].iloc[-1]
         for pos in list(self.open_positions):
-            self._close_position(pos, fc, m15_df.index[-1], "期間終了", total_bars - 1)
+            self._close_position(pos, fc, m15_df.index[-1], "END", total_bars - 1)
 
-        print("✅ バックテスト完了")
+        print("Backtest complete")
 
-    def _calc_lot(self, dd_pct=0):
+    def _calc_lot(self, sl_dist, dd_pct=0):
         cfg = self.cfg
         risk_pct = cfg.RISK_PERCENT
         if dd_pct >= cfg.MAX_DD_PERCENT:
@@ -359,81 +435,157 @@ class USDJPYBacktester:
             risk_pct *= 0.5
 
         risk_amount = self.balance * risk_pct / 100.0
-        # USDJPYの場合: 1lot=100,000通貨, 1pip=0.01, 損失=SL_PIPS * 0.01 * 100,000 * lot
-        risk_per_lot = cfg.SL_PIPS * cfg.PIP_VALUE * 100_000
+        # USDJPY: 1lot=100,000 units, loss = sl_dist * 100,000 * lot
+        # sl_dist is in price units (e.g., 0.25 = 25 pips)
+        risk_per_lot = sl_dist * 100_000
         if risk_per_lot <= 0:
             return cfg.MIN_LOT
         lot = risk_amount / risk_per_lot
         lot = max(cfg.MIN_LOT, min(cfg.MAX_LOT, round(lot, 2)))
         return lot
 
-    def _open_trade(self, direction, price, time, score, dd_pct):
+    def _open_trade(self, direction, price, time, score, dd_pct, sl_dist, tp_dist, atr, vol_regime):
         cfg = self.cfg
-        pip = cfg.PIP_VALUE
-        spread = cfg.MAX_SPREAD_PIPS * pip * 0.5
+        spread = cfg.MAX_SPREAD_PIPS * cfg.PIP_VALUE * 0.5
 
         entry = price + spread if direction == "BUY" else price - spread
         if direction == "BUY":
-            sl = entry - cfg.SL_PIPS * pip
-            tp = entry + cfg.TP_PIPS * pip
+            sl = entry - sl_dist
+            tp = entry + tp_dist
         else:
-            sl = entry + cfg.SL_PIPS * pip
-            tp = entry - cfg.TP_PIPS * pip
+            sl = entry + sl_dist
+            tp = entry - tp_dist
 
-        lot = self._calc_lot(dd_pct)
+        lot = self._calc_lot(sl_dist, dd_pct)
+
+        trade_id = len(self.trades) + len(self.open_positions)
         self.open_positions.append({
+            "id": trade_id,
             "direction": direction,
             "entry": entry,
             "sl": sl,
             "tp": tp,
             "lot": lot,
+            "original_lot": lot,
             "open_time": time,
             "score": score,
+            "sl_dist": sl_dist,
+            "tp_dist": tp_dist,
+            "atr": atr,
+            "vol_regime": vol_regime,
             "breakeven_done": False,
+            "partial_closed": False,
         })
 
-    def _manage_positions(self, high, low, close, time, bar_idx=0):
+    def _manage_positions(self, high, low, close, time, bar_idx=0, cur_atr=None):
         cfg = self.cfg
         pip = cfg.PIP_VALUE
         for pos in list(self.open_positions):
             if pos["direction"] == "BUY":
                 if low <= pos["sl"]:
-                    self._close_position(pos, pos["sl"], time, "SL", bar_idx); continue
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    continue
                 if high >= pos["tp"]:
-                    self._close_position(pos, pos["tp"], time, "TP", bar_idx); continue
-                profit = (close - pos["entry"]) / pip
-                if not pos["breakeven_done"] and profit >= cfg.BREAKEVEN_PIPS:
-                    pos["sl"] = pos["entry"] + 1 * pip
+                    self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    continue
+
+                profit_dist = close - pos["entry"]
+
+                # ★ Half-TP partial close
+                if cfg.USE_PARTIAL_CLOSE and not pos["partial_closed"]:
+                    half_tp_dist = pos["tp_dist"] * cfg.PARTIAL_TP_RATIO
+                    if profit_dist >= half_tp_dist:
+                        partial_lot = round(pos["lot"] * cfg.PARTIAL_CLOSE_RATIO, 2)
+                        if partial_lot >= cfg.MIN_LOT:
+                            # Close partial: realize profit on half
+                            partial_pnl = profit_dist / pip * partial_lot * 1000
+                            self.balance += partial_pnl
+                            pos["lot"] -= partial_lot
+                            pos["partial_closed"] = True
+                            # Move SL to breakeven
+                            pos["sl"] = pos["entry"] + pip
+                            pos["breakeven_done"] = True
+                            self.trades.append({
+                                "open_time": pos["open_time"],
+                                "close_time": time,
+                                "direction": pos["direction"],
+                                "entry": round(pos["entry"], 3),
+                                "exit": round(close, 3),
+                                "lot": partial_lot,
+                                "pnl_pips": round(profit_dist / pip, 1),
+                                "pnl_jpy": round(partial_pnl, 0),
+                                "balance": round(self.balance, 0),
+                                "reason": "HALF",
+                                "score": pos["score"],
+                            })
+
+                # Breakeven (ATR-based)
+                be_dist = pos.get("atr", cur_atr or 0.15) * cfg.BE_ATR_MULTI
+                trail_step = pos.get("atr", cur_atr or 0.15) * cfg.TRAIL_ATR_MULTI
+
+                if not pos["breakeven_done"] and profit_dist >= be_dist:
+                    pos["sl"] = pos["entry"] + pip
                     pos["breakeven_done"] = True
-                elif profit >= cfg.TRAILING_START:
-                    ns = close - cfg.TRAILING_STEP * pip
-                    if ns > pos["sl"]:
+                elif profit_dist >= be_dist * 1.5:
+                    ns = close - trail_step
+                    if ns > pos["sl"] + pip * 0.5:
                         pos["sl"] = ns
             else:
                 if high >= pos["sl"]:
-                    self._close_position(pos, pos["sl"], time, "SL", bar_idx); continue
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    continue
                 if low <= pos["tp"]:
-                    self._close_position(pos, pos["tp"], time, "TP", bar_idx); continue
-                profit = (pos["entry"] - close) / pip
-                if not pos["breakeven_done"] and profit >= cfg.BREAKEVEN_PIPS:
-                    pos["sl"] = pos["entry"] - 1 * pip
+                    self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    continue
+
+                profit_dist = pos["entry"] - close
+
+                # Half-TP
+                if cfg.USE_PARTIAL_CLOSE and not pos["partial_closed"]:
+                    half_tp_dist = pos["tp_dist"] * cfg.PARTIAL_TP_RATIO
+                    if profit_dist >= half_tp_dist:
+                        partial_lot = round(pos["lot"] * cfg.PARTIAL_CLOSE_RATIO, 2)
+                        if partial_lot >= cfg.MIN_LOT:
+                            partial_pnl = profit_dist / pip * partial_lot * 1000
+                            self.balance += partial_pnl
+                            pos["lot"] -= partial_lot
+                            pos["partial_closed"] = True
+                            pos["sl"] = pos["entry"] - pip
+                            pos["breakeven_done"] = True
+                            self.trades.append({
+                                "open_time": pos["open_time"],
+                                "close_time": time,
+                                "direction": pos["direction"],
+                                "entry": round(pos["entry"], 3),
+                                "exit": round(close, 3),
+                                "lot": partial_lot,
+                                "pnl_pips": round(profit_dist / pip, 1),
+                                "pnl_jpy": round(partial_pnl, 0),
+                                "balance": round(self.balance, 0),
+                                "reason": "HALF",
+                                "score": pos["score"],
+                            })
+
+                be_dist = pos.get("atr", cur_atr or 0.15) * cfg.BE_ATR_MULTI
+                trail_step = pos.get("atr", cur_atr or 0.15) * cfg.TRAIL_ATR_MULTI
+
+                if not pos["breakeven_done"] and profit_dist >= be_dist:
+                    pos["sl"] = pos["entry"] - pip
                     pos["breakeven_done"] = True
-                elif profit >= cfg.TRAILING_START:
-                    ns = close + cfg.TRAILING_STEP * pip
-                    if ns < pos["sl"]:
+                elif profit_dist >= be_dist * 1.5:
+                    ns = close + trail_step
+                    if ns < pos["sl"] - pip * 0.5:
                         pos["sl"] = ns
 
     def _close_position(self, pos, exit_price, time, reason, bar_idx=0):
         cfg = self.cfg
         pip = cfg.PIP_VALUE
 
-        # ★ SL時にクールダウン設定
         if reason == "SL" and bar_idx > 0:
             self.cooldown_until = bar_idx + cfg.COOLDOWN_BARS
 
         pnl_pips = ((exit_price - pos["entry"]) if pos["direction"] == "BUY"
                      else (pos["entry"] - exit_price)) / pip
-        # USDJPY: 1lot=100,000通貨, 1pip=0.01 → 1pip動くと1,000円/lot
         pnl_jpy = pnl_pips * pos["lot"] * 1000
 
         self.balance += pnl_jpy
@@ -461,7 +613,7 @@ class USDJPYBacktester:
 
     def get_report(self):
         if not self.trades:
-            return {"error": "取引なし"}
+            return {"error": "No trades"}
         df = pd.DataFrame(self.trades)
         wins = df[df["pnl_pips"] > 0]
         losses = df[df["pnl_pips"] <= 0]
@@ -495,32 +647,32 @@ class USDJPYBacktester:
         )
 
         return {
-            "期間": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
-            "初期資金": f"{self.cfg.INITIAL_BALANCE:,.0f}円",
-            "最終残高": f"{self.balance:,.0f}円",
-            "総損益": f"{total_pnl:+,.0f}円",
-            "リターン": f"{(self.balance / self.cfg.INITIAL_BALANCE - 1) * 100:+.1f}%",
-            "取引回数": len(df),
-            "勝率": f"{win_rate:.1f}%（{len(wins)}勝/{len(losses)}敗）",
-            "平均勝ち": f"{avg_win:.1f}pips ({avg_win_jpy:+,.0f}円)",
-            "平均負け": f"{avg_loss:.1f}pips ({avg_loss_jpy:,.0f}円)",
-            "RR比": f"1:{avg_win/avg_loss:.2f}" if avg_loss > 0 else "N/A",
-            "PF": f"{pf:.2f}" if pf != float("inf") else "∞",
-            "最大DD": f"{max_dd:.1f}% ({max_dd_jpy:,.0f}円)",
-            "月間勝率": f"{pm}/{tm} ({pm/tm*100:.0f}%)" if tm > 0 else "N/A",
-            "月別": monthly.to_dict(),
-            "理由別": reason_stats.to_dict(),
+            "Period": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
+            "Initial": f"{self.cfg.INITIAL_BALANCE:,.0f} JPY",
+            "Final": f"{self.balance:,.0f} JPY",
+            "P&L": f"{total_pnl:+,.0f} JPY",
+            "Return": f"{(self.balance / self.cfg.INITIAL_BALANCE - 1) * 100:+.1f}%",
+            "Trades": len(df),
+            "WinRate": f"{win_rate:.1f}% ({len(wins)}W/{len(losses)}L)",
+            "AvgWin": f"{avg_win:.1f}pips ({avg_win_jpy:+,.0f} JPY)",
+            "AvgLoss": f"{avg_loss:.1f}pips ({avg_loss_jpy:,.0f} JPY)",
+            "RR": f"1:{avg_win/avg_loss:.2f}" if avg_loss > 0 else "N/A",
+            "PF": f"{pf:.2f}" if pf != float("inf") else "inf",
+            "MaxDD": f"{max_dd:.1f}% ({max_dd_jpy:,.0f} JPY)",
+            "Monthly": f"{pm}/{tm} ({pm/tm*100:.0f}%)" if tm > 0 else "N/A",
+            "monthly_detail": monthly.to_dict(),
+            "reason_stats": reason_stats.to_dict(),
         }
 
 
 # ============================================================
-# メイン
+# Main
 # ============================================================
 if __name__ == "__main__":
     cfg = USDJPYConfig()
     h4, h1, m15 = fetch_usdjpy_data(months=12)
     if m15 is None:
-        print("❌ データ取得失敗")
+        print("Data fetch failed")
         exit()
 
     bt = USDJPYBacktester(cfg)
@@ -529,28 +681,28 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print("📊 AntigravityMTF EA [USDJPY] バックテスト結果（直近1年）")
+        print("AntigravityMTF EA [USDJPY] v2.0 Backtest (1 year)")
         print("=" * 60)
         for k, v in rpt.items():
-            if k == "月別":
-                print(f"\n📅 月別損益:")
+            if k == "monthly_detail":
+                print(f"\nMonthly P&L:")
                 for m, p in v.items():
-                    bar = "█" * max(1, int(abs(p) / 2000))
-                    icon = "🟢" if p > 0 else "🔴"
-                    print(f"  {m}: {icon} {p:+,.0f}円 {bar}")
-            elif k == "理由別":
-                print(f"\n📋 決済理由別:")
+                    bar = "#" * max(1, int(abs(p) / 2000))
+                    icon = "+" if p > 0 else "-"
+                    print(f"  {m}: [{icon}] {p:+,.0f} JPY {bar}")
+            elif k == "reason_stats":
+                print(f"\nExit Reasons:")
                 counts = v.get("count", {})
                 pnls = v.get("pnl", {})
                 for reason in counts:
-                    print(f"  {reason}: {int(counts[reason])}回 / {pnls[reason]:+,.0f}円")
+                    print(f"  {reason}: {int(counts[reason])}x / {pnls[reason]:+,.0f} JPY")
             else:
                 print(f"  {k}: {v}")
 
-        print(f"\n📋 取引詳細（直近10件）:")
-        print(f"  {'日時':<20} {'方向':<5} {'Entry':>9} {'Exit':>9} {'Lot':>5} {'損益(pip)':>8} {'損益(円)':>10} {'残高':>12} {'理由':<6} {'Score':<5}")
-        print("  " + "-" * 100)
+        print(f"\nLast 10 trades:")
+        print(f"  {'Time':<20} {'Dir':<5} {'Entry':>9} {'Exit':>9} {'Lot':>5} {'PnL(pip)':>8} {'PnL(JPY)':>10} {'Balance':>12} {'Reason':<6}")
+        print("  " + "-" * 95)
         for t in bt.trades[-10:]:
-            print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>9.3f} {t['exit']:>9.3f} {t['lot']:>5.2f} {t['pnl_pips']:>8.1f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<6} {t['score']:<5}")
+            print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>9.3f} {t['exit']:>9.3f} {t['lot']:>5.2f} {t['pnl_pips']:>8.1f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<6}")
     else:
-        print("❌ 取引が発生しませんでした")
+        print("No trades generated")

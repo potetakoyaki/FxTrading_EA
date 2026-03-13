@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            10万円口座 デュアル運用版（USDJPY EAと併用）              |
+//|            v2.0: ATR動的SL/TP + ボラレジーム + セッション最適化     |
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "1.10"
-#property description "XAUUSD専用: MTF複合分析EA (USDJPY版と併用可)"
+#property version   "2.00"
+#property description "XAUUSD専用 v2.0: 動的SL/TP + ボラレジーム + セッション + 半利確"
 
 #include <Trade/Trade.mqh>
 
@@ -13,47 +13,62 @@
 //| 入力パラメータ                                                      |
 //+------------------------------------------------------------------+
 input group "=== リスク管理 ==="
-input double RiskPercent       = 0.2;     // リスク% ★デュアル運用0.2%
-input double MaxLots           = 0.50;    // 最大ロット
-input double MinLots           = 0.01;    // 最小ロット
-input int    MaxSpread         = 50;      // 最大スプレッド(ポイント) ★ゴールド用
-input int    MaxPositions      = 1;       // 最大同時ポジション数
-input int    MagicNumber       = 20260224;// マジックナンバー ★USDJPY版と異なる
-input double MaxDrawdownPct    = 6.0;     // DD 6%以上でリスク1/4
-input double DDHalfRiskPct     = 2.5;     // DD 2.5%以上でリスク1/2
+input double RiskPercent       = 0.3;     // リスク% ★ATR-SLで自動調整
+input double MaxLots           = 0.50;
+input double MinLots           = 0.01;
+input int    MaxSpread         = 50;
+input int    MaxPositions      = 1;
+input int    MagicNumber       = 20260224;
+input double MaxDrawdownPct    = 6.0;
+input double DDHalfRiskPct     = 2.5;
 
-input group "=== 損益設定（ゴールド用: ポイント単位） ==="
-input int    StopLossPoints    = 500;     // SL (ポイント) ≒ $5.00 ★拡大
-input int    TakeProfitPoints  = 1250;    // TP (ポイント) ≒ $12.50 RR1:2.5
-input int    TrailingStartPts  = 350;     // トレーリング開始 ≒ $3.50
-input int    TrailingStepPts   = 150;     // トレーリングステップ ≒ $1.50
-input int    BreakevenPts      = 250;     // 建値移動 ≒ $2.50
+input group "=== 動的損益設定（ATRベース） ==="
+input int    ATR_Period_SL     = 14;      // ATR期間（SL/TP計算用・M15）
+input double SL_ATR_Multi      = 1.5;     // SL = M15 ATR × 倍率
+input double TP_ATR_Multi      = 3.5;     // TP = M15 ATR × 倍率 (RR 1:2.3)
+input double Trail_ATR_Multi   = 1.0;     // トレーリングステップ = ATR × 倍率
+input double BE_ATR_Multi      = 1.5;     // 建値移動 = ATR × 倍率
+input double MinSL_Points      = 200.0;   // 最小SL (ポイント)
+input double MaxSL_Points      = 1500.0;  // 最大SL (ポイント)
+
+input group "=== ボラティリティレジーム ==="
+input int    VolRegime_Period  = 50;      // ATR平均期間（レジーム判定）
+input double VolRegime_Low     = 0.7;     // 低ボラ閾値（これ以下はスキップ）
+input double VolRegime_High    = 1.5;     // 高ボラ閾値（SL倍率を拡大）
+input double HighVol_SL_Bonus  = 0.5;     // 高ボラ時のSL追加倍率
 
 input group "=== トレンドフィルター（H4足） ==="
-input int    H4_MA_Fast        = 20;      // H4 SMA短期
-input int    H4_MA_Slow        = 50;      // H4 SMA長期
-input int    H4_ADX_Period     = 14;      // H4 ADX期間
-input int    H4_ADX_Threshold  = 20;      // H4 ADX閾値
+input int    H4_MA_Fast        = 20;
+input int    H4_MA_Slow        = 50;
+input int    H4_ADX_Period     = 14;
+input int    H4_ADX_Threshold  = 20;
 
 input group "=== メイン足（H1） ==="
-input int    H1_MA_Fast        = 10;      // H1 EMA短期
-input int    H1_MA_Slow        = 30;      // H1 EMA長期
-input int    H1_RSI_Period     = 14;      // H1 RSI期間
-input int    H1_BB_Period      = 20;      // H1 ボリンジャー期間
-input double H1_BB_Deviation   = 2.0;     // H1 ボリンジャー偏差
+input int    H1_MA_Fast        = 10;
+input int    H1_MA_Slow        = 30;
+input int    H1_RSI_Period     = 14;
+input int    H1_BB_Period      = 20;
+input double H1_BB_Deviation   = 2.0;
 
 input group "=== エントリー足（M15） ==="
-input int    M15_MA_Fast       = 5;       // M15 EMA短期
-input int    M15_MA_Slow       = 20;      // M15 EMA長期
+input int    M15_MA_Fast       = 5;
+input int    M15_MA_Slow       = 20;
 
 input group "=== スコアリング ==="
-input int    MinEntryScore     = 6;       // エントリー最低スコア 6/10 ★引き上げ
+input int    MinEntryScore     = 6;       // 最低スコア 6/12
+input bool   UseSessionBonus   = true;    // セッションボーナス有効
+input bool   UseMomentum       = true;    // モメンタム確認有効
 
 input group "=== 時間フィルター ==="
-input int    TradeStartHour    = 8;       // 取引開始時間(サーバー時間)
-input int    TradeEndHour      = 22;      // 取引終了時間
-input bool   AvoidFriday       = true;    // 金曜夜のエントリー回避
-input int    CooldownMinutes   = 240;    // SL後のエントリー禁止時間(分) ★追加
+input int    TradeStartHour    = 8;
+input int    TradeEndHour      = 22;
+input bool   AvoidFriday       = true;
+input int    CooldownMinutes   = 240;
+
+input group "=== 半利確 ==="
+input bool   UsePartialClose   = true;    // 半分利確を有効化
+input double PartialCloseRatio = 0.5;     // 利確するポジション割合
+input double PartialTP_Ratio   = 0.5;     // TP距離の何%で半利確
 
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
@@ -63,8 +78,10 @@ double         peakBalance;
 int            h_h4_ma_fast, h_h4_ma_slow, h_h4_adx;
 int            h_h1_ma_fast, h_h1_ma_slow, h_h1_rsi, h_h1_bb;
 int            h_m15_ma_fast, h_m15_ma_slow;
+int            h_m15_atr;                 // ★ M15 ATR（動的SL/TP用）
 datetime       lastBarTime;
-datetime       lastSLTime;      // 直近SL時刻（クールダウン用）
+datetime       lastSLTime;
+ulong          partialClosedTickets[];
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -72,7 +89,7 @@ datetime       lastSLTime;      // 直近SL時刻（クールダウン用）
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
-   trade.SetDeviationInPoints(30);  // ゴールドはスリッページ大きめ
+   trade.SetDeviationInPoints(30);
    peakBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    trade.SetTypeFilling(ORDER_FILLING_FOK);
 
@@ -91,21 +108,23 @@ int OnInit()
    h_m15_ma_fast = iMA(_Symbol, PERIOD_M15, M15_MA_Fast, 0, MODE_EMA, PRICE_CLOSE);
    h_m15_ma_slow = iMA(_Symbol, PERIOD_M15, M15_MA_Slow, 0, MODE_EMA, PRICE_CLOSE);
 
+   // ★ M15 ATR（動的SL/TP計算用）
+   h_m15_atr = iATR(_Symbol, PERIOD_M15, ATR_Period_SL);
+
    // ハンドル検証
    if(h_h4_ma_fast == INVALID_HANDLE || h_h4_ma_slow == INVALID_HANDLE ||
       h_h4_adx == INVALID_HANDLE || h_h1_ma_fast == INVALID_HANDLE ||
       h_h1_ma_slow == INVALID_HANDLE || h_h1_rsi == INVALID_HANDLE ||
       h_h1_bb == INVALID_HANDLE || h_m15_ma_fast == INVALID_HANDLE ||
-      h_m15_ma_slow == INVALID_HANDLE)
+      h_m15_ma_slow == INVALID_HANDLE || h_m15_atr == INVALID_HANDLE)
    {
-      Print("❌ インジケーターハンドルの作成に失敗");
+      Print("インジケーターハンドルの作成に失敗");
       return INIT_FAILED;
    }
 
-   Print("✅ AntigravityMTF EA [GOLD] 初期化完了");
-   Print("   リスク: ", RiskPercent, "% / SL: ", StopLossPoints, "pt / TP: ", TakeProfitPoints, "pt");
-   Print("   マジックナンバー: ", MagicNumber);
-   Print("   1ポイント = ", _Point, " / 桁数 = ", _Digits);
+   Print("AntigravityMTF EA [GOLD] v2.0 初期化完了");
+   Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
+   Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    return INIT_SUCCEEDED;
 }
 
@@ -123,6 +142,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(h_h1_bb);
    IndicatorRelease(h_m15_ma_fast);
    IndicatorRelease(h_m15_ma_slow);
+   IndicatorRelease(h_m15_atr);
 }
 
 //+------------------------------------------------------------------+
@@ -141,9 +161,16 @@ void OnTick()
    if(!CheckSpread()) return;
    if(CountMyPositions() >= MaxPositions) return;
 
-   // ★ SL後クールダウン: 連続負けを防止
+   // SL後クールダウン
    if(lastSLTime > 0 && TimeCurrent() - lastSLTime < CooldownMinutes * 60)
       return;
+
+   // ★ ATR取得 & ボラティリティレジーム判定
+   double currentATR = GetCurrentATR();
+   if(currentATR <= 0) return;
+
+   int volRegime = GetVolatilityRegime(currentATR);
+   if(volRegime == 0) return;  // 低ボラ → スキップ
 
    // 動的リスクスケーリング
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -158,70 +185,172 @@ void OnTick()
 
    // 1. H4 トレンド（3点）
    int h4Trend = GetH4Trend();
-   if(h4Trend == 1)       { buyScore += 3;  buyReasons  += "H4↑ "; }
-   else if(h4Trend == -1) { sellScore += 3;  sellReasons += "H4↓ "; }
+   if(h4Trend == 1)       { buyScore += 3;  buyReasons  += "H4^ "; }
+   else if(h4Trend == -1) { sellScore += 3;  sellReasons += "H4v "; }
 
    // 2. H1 MA方向（2点）
    int h1MACross = GetH1MACross();
-   if(h1MACross == 1)       { buyScore += 2;  buyReasons  += "H1MA↑ "; }
-   else if(h1MACross == -1) { sellScore += 2;  sellReasons += "H1MA↓ "; }
+   if(h1MACross == 1)       { buyScore += 2;  buyReasons  += "H1MA^ "; }
+   else if(h1MACross == -1) { sellScore += 2;  sellReasons += "H1MAv "; }
 
-   // 3. H1 RSI（1点）— 買いと売りで排他的な範囲
+   // 3. H1 RSI（1点）
    double h1Rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
-   if(h1Rsi > 40 && h1Rsi < 60)         { buyScore += 1;  sellScore += 1;  buyReasons += "RSI中立 ";  sellReasons += "RSI中立 "; }
-   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += 1;  buyReasons  += "RSI買適正 "; }
-   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += 1;  sellReasons += "RSI売適正 "; }
+   if(h1Rsi > 40 && h1Rsi < 60)         { buyScore += 1;  sellScore += 1;  buyReasons += "RSIn "; sellReasons += "RSIn "; }
+   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += 1;  buyReasons  += "RSIb "; }
+   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += 1;  sellReasons += "RSIs "; }
 
    // 4. H1 BB（1点）
    int bbSignal = GetBBSignal();
-   if(bbSignal == 1)       { buyScore += 1;  buyReasons  += "BB↑ "; }
-   else if(bbSignal == -1) { sellScore += 1;  sellReasons += "BB↓ "; }
+   if(bbSignal == 1)       { buyScore += 1;  buyReasons  += "BB^ "; }
+   else if(bbSignal == -1) { sellScore += 1;  sellReasons += "BBv "; }
 
    // 5. M15 MAクロス（2点）
    int m15Cross = GetM15MACross();
-   if(m15Cross == 1)       { buyScore += 2;  buyReasons  += "M15↑ "; }
-   else if(m15Cross == -1) { sellScore += 2;  sellReasons += "M15↓ "; }
+   if(m15Cross == 1)       { buyScore += 2;  buyReasons  += "M15^ "; }
+   else if(m15Cross == -1) { sellScore += 2;  sellReasons += "M15v "; }
 
    // 6. チャネル回帰（1点）
    int channelSignal = GetChannelSignal();
-   if(channelSignal == 1)       { buyScore += 1;  buyReasons  += "CH↑ "; }
-   else if(channelSignal == -1) { sellScore += 1;  sellReasons += "CH↓ "; }
+   if(channelSignal == 1)       { buyScore += 1;  buyReasons  += "CH^ "; }
+   else if(channelSignal == -1) { sellScore += 1;  sellReasons += "CHv "; }
+
+   // 7. ★ モメンタム確認（1点）
+   if(UseMomentum)
+   {
+      int momentum = GetMomentum();
+      if(momentum == 1)       { buyScore += 1;  buyReasons  += "MOM^ "; }
+      else if(momentum == -1) { sellScore += 1;  sellReasons += "MOMv "; }
+   }
+
+   // 8. ★ セッションボーナス（1点）— Gold はロンドン/NY重複が有利
+   if(UseSessionBonus)
+   {
+      int sessionBonus = GetSessionBonus();
+      if(sessionBonus > 0)
+      {
+         buyScore += 1;  sellScore += 1;
+         buyReasons += "SES "; sellReasons += "SES ";
+      }
+   }
 
    // ──── エントリー ────
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double lot = CalcLotSize();
 
-   // ★ 動的スコア防壁（DDが深い時はパーフェクトなセットアップしか狙わない）
+   // ★ 動的SL/TP計算（ATRベース）
+   double slMulti = SL_ATR_Multi;
+   if(volRegime == 2) slMulti += HighVol_SL_Bonus;
+
+   double slDist = currentATR * slMulti;
+   double tpDist = currentATR * TP_ATR_Multi;
+
+   // SLの最小/最大制限（ポイント単位）
+   double minSL = MinSL_Points * _Point;
+   double maxSL = MaxSL_Points * _Point;
+   slDist = MathMax(minSL, MathMin(maxSL, slDist));
+   tpDist = MathMax(slDist * 1.5, tpDist);  // RR最低1:1.5保証
+
+   double lot = CalcLotSize(ask, slDist);
+
+   // 動的スコア防壁
    int currentMinScore = MinEntryScore;
-   if(currentDD >= 20.0)      currentMinScore = 9;  // 鉄壁モード
-   else if(currentDD >= 15.0) currentMinScore = 8;  // 超厳格モード
-   else if(currentDD >= 10.0) currentMinScore = 7;  // 厳格モード
+   if(currentDD >= 20.0)      currentMinScore = 10;
+   else if(currentDD >= 15.0) currentMinScore = 9;
+   else if(currentDD >= 10.0) currentMinScore = 8;
 
-   // ★ ゴールドは _Point をそのまま使う（ポイント単位）
    if(buyScore >= currentMinScore && buyScore > sellScore)
    {
-      double sl = ask - StopLossPoints * _Point;
-      double tp = ask + TakeProfitPoints * _Point;
+      double sl = NormalizeDouble(ask - slDist, _Digits);
+      double tp = NormalizeDouble(ask + tpDist, _Digits);
 
-      sl = NormalizeDouble(sl, _Digits);
-      tp = NormalizeDouble(tp, _Digits);
-
-      if(trade.Buy(lot, _Symbol, ask, sl, tp, StringFormat("GOLD BUY Score:%d [%s]", buyScore, buyReasons)))
-         Print("🟢 GOLD BUY — Score: ", buyScore, "/11 — ", buyReasons);
+      if(trade.Buy(lot, _Symbol, ask, sl, tp,
+         StringFormat("GOLD BUY S:%d ATR:%.1f", buyScore, currentATR/_Point)))
+         Print("GOLD BUY Score:", buyScore, "/12 ATR:", DoubleToString(currentATR/_Point,0),
+               "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
+               " [", buyReasons, "]");
    }
 
    if(sellScore >= currentMinScore && sellScore > buyScore)
    {
-      double sl = bid + StopLossPoints * _Point;
-      double tp = bid - TakeProfitPoints * _Point;
+      double sl = NormalizeDouble(bid + slDist, _Digits);
+      double tp = NormalizeDouble(bid - tpDist, _Digits);
 
-      sl = NormalizeDouble(sl, _Digits);
-      tp = NormalizeDouble(tp, _Digits);
-
-      if(trade.Sell(lot, _Symbol, bid, sl, tp, StringFormat("GOLD SELL Score:%d [%s]", sellScore, sellReasons)))
-         Print("🔴 GOLD SELL — Score: ", sellScore, "/11 — ", sellReasons);
+      if(trade.Sell(lot, _Symbol, bid, sl, tp,
+         StringFormat("GOLD SELL S:%d ATR:%.1f", sellScore, currentATR/_Point)))
+         Print("GOLD SELL Score:", sellScore, "/12 ATR:", DoubleToString(currentATR/_Point,0),
+               "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
+               " [", sellReasons, "]");
    }
+}
+
+//+------------------------------------------------------------------+
+//| ★ 現在のM15 ATR取得                                               |
+//+------------------------------------------------------------------+
+double GetCurrentATR()
+{
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(h_m15_atr, 0, 1, 1, atr) < 1) return 0;
+   return atr[0];
+}
+
+//+------------------------------------------------------------------+
+//| ★ ボラティリティレジーム判定                                        |
+//+------------------------------------------------------------------+
+int GetVolatilityRegime(double currentATR)
+{
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(h_m15_atr, 0, 1, VolRegime_Period, atr) < VolRegime_Period) return 1;
+
+   double sum = 0;
+   for(int i = 0; i < VolRegime_Period; i++)
+      sum += atr[i];
+   double avgATR = sum / VolRegime_Period;
+
+   if(avgATR <= 0) return 1;
+   double ratio = currentATR / avgATR;
+
+   if(ratio < VolRegime_Low) return 0;
+   if(ratio > VolRegime_High) return 2;
+   return 1;
+}
+
+//+------------------------------------------------------------------+
+//| ★ モメンタム判定（M15の直近3本の方向）                              |
+//+------------------------------------------------------------------+
+int GetMomentum()
+{
+   double close1 = iClose(_Symbol, PERIOD_M15, 1);
+   double close3 = iClose(_Symbol, PERIOD_M15, 3);
+
+   if(close1 == 0 || close3 == 0) return 0;
+
+   // ゴールドはATRの10%以上の動きで判定
+   double atr = GetCurrentATR();
+   double threshold = (atr > 0) ? atr * 0.1 : 1.0 * _Point;
+
+   if(close1 - close3 > threshold) return 1;
+   if(close3 - close1 > threshold) return -1;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| ★ セッションボーナス（Gold用: ロンドン/NY重複が最も有利）           |
+//+------------------------------------------------------------------+
+int GetSessionBonus()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   // ロンドン/NY重複 (13:00-17:00 サーバー時間 ≒ GMT+2)
+   // = ゴールドが最も流動性が高い時間帯
+   if(dt.hour >= 13 && dt.hour < 17) return 1;
+
+   // ロンドンセッション初動 (8:00-11:00)
+   if(dt.hour >= 8 && dt.hour < 11) return 1;
+
+   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -331,7 +460,7 @@ int GetChannelSignal()
    double currentPredicted = intercept + slope * (n - 1);
    double upperChannel = currentPredicted + stdDev * 2;
    double lowerChannel = currentPredicted - stdDev * 2;
-   double close = iClose(_Symbol, PERIOD_H1, 1);  // 確定足を使用
+   double close = iClose(_Symbol, PERIOD_H1, 1);
 
    if(upperChannel == lowerChannel) return 0;
    double channelPos = (close - lowerChannel) / (upperChannel - lowerChannel);
@@ -342,10 +471,12 @@ int GetChannelSignal()
 }
 
 //+------------------------------------------------------------------+
-//| ロット計算（ゴールド用）                                            |
+//| ロット計算（ゴールド用・OrderCalcProfit使用）                       |
 //+------------------------------------------------------------------+
-double CalcLotSize()
+double CalcLotSize(double entryPrice, double slDist)
 {
+   if(slDist <= 0) return MinLots;
+
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    if(balance > peakBalance) peakBalance = balance;
    double currentDD = (peakBalance > 0) ? (peakBalance - balance) / peakBalance * 100 : 0;
@@ -358,28 +489,24 @@ double CalcLotSize()
 
    double riskAmount = balance * riskPct / 100.0;
 
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double slPrice = ask - StopLossPoints * _Point;
+   double slPrice = entryPrice - slDist;
    double profitOrLoss = 0.0;
-   
-   // ★ MT5内蔵の利益計算関数に「1ロットでSLにかかった場合の口座通貨ベースの損失額」を直接聞く
-   // スタンダード口座（100oz）、マイクロ口座（1oz）など、証券会社の仕様を完全に自動で判別します。
-   if(!OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, 1.0, ask, slPrice, profitOrLoss))
+
+   // MT5内蔵の利益計算関数で正確なリスク額を算出
+   if(!OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, 1.0, entryPrice, slPrice, profitOrLoss))
    {
-      // 計算失敗時のフェールセーフ
       double usdJpyRate = SymbolInfoDouble("USDJPY", SYMBOL_BID);
       if(usdJpyRate <= 0) usdJpyRate = 150.0;
-      profitOrLoss = -((StopLossPoints / 100.0) * 100.0 * usdJpyRate);
+      profitOrLoss = -((slDist / _Point / 100.0) * 100.0 * usdJpyRate);
    }
-   
+
    double lossForOneLot = MathAbs(profitOrLoss);
-   if(lossForOneLot <= 0) lossForOneLot = 1000.0; // ゼロ割防止
-   
+   if(lossForOneLot <= 0) lossForOneLot = 1000.0;
+
    double lots = riskAmount / lossForOneLot;
 
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    if(lotStep <= 0) lotStep = 0.01;
-   
    lots = MathFloor(lots / lotStep) * lotStep;
    lots = MathMax(MinLots, MathMin(MaxLots, lots));
 
@@ -387,10 +514,12 @@ double CalcLotSize()
 }
 
 //+------------------------------------------------------------------+
-//| ポジション管理（ゴールド用: ポイント単位）                           |
+//| ポジション管理（ATRベース + 半利確）                                 |
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
+   double curATR = GetCurrentATR();
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
@@ -401,45 +530,114 @@ void ManageOpenPositions()
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl        = PositionGetDouble(POSITION_SL);
       double tp        = PositionGetDouble(POSITION_TP);
+      double volume    = PositionGetDouble(POSITION_VOLUME);
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
-      // ★ ゴールドは _Point をそのまま使用
-      double pointVal = _Point;
+      double beDist    = (curATR > 0) ? curATR * BE_ATR_Multi : MathAbs(tp - openPrice) * 0.4;
+      double trailStep = (curATR > 0) ? curATR * Trail_ATR_Multi : MathAbs(tp - openPrice) * 0.3;
 
       if(posType == POSITION_TYPE_BUY)
       {
          double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double profitPts = (bid - openPrice) / pointVal;
+         double profitDist = bid - openPrice;
 
-         if(profitPts >= BreakevenPts && sl < openPrice)
+         // 半利確
+         if(UsePartialClose && !IsPartialClosed(ticket) && tp > openPrice)
          {
-            double newSL = NormalizeDouble(openPrice + 10 * pointVal, _Digits);
+            double tpDist = tp - openPrice;
+            if(profitDist >= tpDist * PartialTP_Ratio)
+            {
+               double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
+               if(closeLot >= MinLots)
+               {
+                  if(trade.PositionClosePartial(ticket, closeLot))
+                  {
+                     MarkPartialClosed(ticket);
+                     double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
+                     trade.PositionModify(ticket, newSL, tp);
+                     Print("GOLD 半利確 BUY: ", DoubleToString(closeLot, 2), "lot決済");
+                  }
+               }
+            }
+         }
+
+         // 建値移動
+         if(profitDist >= beDist && sl < openPrice)
+         {
+            double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
             trade.PositionModify(ticket, newSL, tp);
          }
-         else if(profitPts >= TrailingStartPts)
+         // トレーリング
+         else if(profitDist >= beDist * 1.5)
          {
-            double newSL = NormalizeDouble(bid - TrailingStepPts * pointVal, _Digits);
-            if(newSL > sl + 5 * pointVal)
+            double newSL = NormalizeDouble(bid - trailStep, _Digits);
+            if(newSL > sl + 5 * _Point)
                trade.PositionModify(ticket, newSL, tp);
          }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double profitPts = (openPrice - ask) / pointVal;
+         double profitDist = openPrice - ask;
 
-         if(profitPts >= BreakevenPts && (sl > openPrice || sl == 0))
+         // 半利確
+         if(UsePartialClose && !IsPartialClosed(ticket) && tp < openPrice)
          {
-            double newSL = NormalizeDouble(openPrice - 10 * pointVal, _Digits);
+            double tpDist = openPrice - tp;
+            if(profitDist >= tpDist * PartialTP_Ratio)
+            {
+               double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
+               if(closeLot >= MinLots)
+               {
+                  if(trade.PositionClosePartial(ticket, closeLot))
+                  {
+                     MarkPartialClosed(ticket);
+                     double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
+                     trade.PositionModify(ticket, newSL, tp);
+                     Print("GOLD 半利確 SELL: ", DoubleToString(closeLot, 2), "lot決済");
+                  }
+               }
+            }
+         }
+
+         // 建値移動
+         if(profitDist >= beDist && (sl > openPrice || sl == 0))
+         {
+            double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
             trade.PositionModify(ticket, newSL, tp);
          }
-         else if(profitPts >= TrailingStartPts)
+         // トレーリング
+         else if(profitDist >= beDist * 1.5)
          {
-            double newSL = NormalizeDouble(ask + TrailingStepPts * pointVal, _Digits);
-            if(newSL < sl - 5 * pointVal || sl == 0)
+            double newSL = NormalizeDouble(ask + trailStep, _Digits);
+            if(newSL < sl - 5 * _Point || sl == 0)
                trade.PositionModify(ticket, newSL, tp);
          }
       }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 半利確トラッキング                                                  |
+//+------------------------------------------------------------------+
+bool IsPartialClosed(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(partialClosedTickets); i++)
+      if(partialClosedTickets[i] == ticket) return true;
+   return false;
+}
+
+void MarkPartialClosed(ulong ticket)
+{
+   int sz = ArraySize(partialClosedTickets);
+   ArrayResize(partialClosedTickets, sz + 1);
+   partialClosedTickets[sz] = ticket;
+
+   if(sz > 100)
+   {
+      for(int i = 0; i < 50; i++)
+         partialClosedTickets[i] = partialClosedTickets[i + 50];
+      ArrayResize(partialClosedTickets, sz - 49);
    }
 }
 
@@ -461,7 +659,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          if(dealMagic == MagicNumber && dealEntry == DEAL_ENTRY_OUT && dealReason == DEAL_REASON_SL)
          {
             lastSLTime = TimeCurrent();
-            Print("⏸️ SLクールダウン開始: ", CooldownMinutes, "分間エントリー停止");
+            Print("SLクールダウン開始: ", CooldownMinutes, "分間エントリー停止");
          }
       }
    }
@@ -512,5 +710,4 @@ double GetIndicatorValue(int handle, int buffer, int shift)
    if(CopyBuffer(handle, buffer, shift, 1, val) <= 0) return 0;
    return val[0];
 }
-
 //+------------------------------------------------------------------+
