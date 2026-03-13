@@ -160,10 +160,11 @@ void OnTick()
    if(h1MACross == 1)       { buyScore += 2;  buyReasons  += "H1MA↑ "; }
    else if(h1MACross == -1) { sellScore += 2;  sellReasons += "H1MA↓ "; }
 
-   // 3. H1 RSI（1点）
+   // 3. H1 RSI（1点）— 買いと売りで排他的な範囲
    double h1Rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
-   if(h1Rsi > 40 && h1Rsi < 65)    { buyScore += 1;  buyReasons  += "RSI適正 "; }
-   if(h1Rsi > 35 && h1Rsi < 60)    { sellScore += 1;  sellReasons += "RSI適正 "; }
+   if(h1Rsi > 40 && h1Rsi < 60)         { buyScore += 1;  sellScore += 1;  buyReasons += "RSI中立 ";  sellReasons += "RSI中立 "; }
+   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += 1;  buyReasons  += "RSI買適正 "; }
+   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += 1;  sellReasons += "RSI売適正 "; }
 
    // 4. H1 BB（1点）
    int bbSignal = GetBBSignal();
@@ -324,7 +325,7 @@ int GetChannelSignal()
    double currentPredicted = intercept + slope * (n - 1);
    double upperChannel = currentPredicted + stdDev * 2;
    double lowerChannel = currentPredicted - stdDev * 2;
-   double close = iClose(_Symbol, PERIOD_H1, 0);
+   double close = iClose(_Symbol, PERIOD_H1, 1);  // 確定足を使用
 
    if(upperChannel == lowerChannel) return 0;
    double channelPos = (close - lowerChannel) / (upperChannel - lowerChannel);
