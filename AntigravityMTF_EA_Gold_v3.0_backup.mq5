@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v4.0: プロ級防御+攻撃 (ニュース/クラッシュ/ピラミッド)    |
+//|            v3.0: USD相関+RSIダイバージェンス+S/R+ローソク足+適応型  |
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "4.00"
-#property description "XAUUSD専用 v4.0: v3.0全機能 + ニュースフィルター + 4状態レジーム + サーキットブレーカー + モメンタムバースト + ピラミッディング + リバーサルモード"
+#property version   "3.00"
+#property description "XAUUSD専用 v3.0: 動的SL/TP + ボラレジーム + セッション + 半利確 + USD相関 + ダイバージェンス + S/R + ローソク足 + シャンデリア + 適応型サイジング"
 
 #include <Trade/Trade.mqh>
 
@@ -17,7 +17,7 @@ input double RiskPercent       = 0.3;     // リスク% ★ATR-SLで自動調整
 input double MaxLots           = 0.50;
 input double MinLots           = 0.01;
 input int    MaxSpread         = 50;
-input int    MaxPositions      = 3;        // v4.0: ピラミッディング対応
+input int    MaxPositions      = 1;
 input int    MagicNumber       = 20260224;
 input double MaxDrawdownPct    = 6.0;
 input double DDHalfRiskPct     = 2.5;
@@ -113,23 +113,6 @@ input double Kelly_Fraction       = 0.5;
 input double Kelly_MinRisk        = 0.1;
 input double Kelly_MaxRisk        = 1.0;
 
-input group "=== v4.0 防御 ==="
-input bool   UseNewsFilter      = true;    // 経済指標フィルター
-input int    NewsBlockMinutes   = 30;      // 指標前後ブロック(分)
-input int    MaxDynamicSpread   = 80;      // 動的スプレッド上限
-input bool   UseWeekendClose    = true;    // 金曜クローズ
-input int    FridayCloseHour    = 20;      // 金曜クローズ時刻(サーバー時間)
-input int    StaleTradeHours    = 48;      // 塩漬け決済(時間)
-input double DailyMaxLossPct    = 2.0;     // 日次最大損失%
-input double CrashATRMulti      = 3.0;     // クラッシュ判定ATR倍率
-
-input group "=== v4.0 攻撃 ==="
-input bool   UseMomentumBurst   = true;    // モメンタムバースト
-input bool   UseVolumeClimax    = true;    // ボリュームクライマックス
-input int    MaxPyramidPositions = 3;      // ピラミッディング上限
-input double PyramidLotDecay    = 0.5;     // ピラミッド追加ロット減衰率
-input bool   UseReversalMode    = true;    // リバーサルモード
-
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
 //+------------------------------------------------------------------+
@@ -145,11 +128,6 @@ ulong          partialClosedTickets[];
 
 // v3.0 新規グローバル変数
 int            h_h4_rsi;
-// v4.0 グローバル変数
-double         g_dailyPnL;
-int            g_lastDay;
-bool           g_circuitBreaker;
-int            g_pyramidCount;
 int            h_usdjpy_ma_fast, h_usdjpy_ma_slow, h_usdjpy_atr;
 double         recentTradeResults[50];
 int            tradeResultIndex;
@@ -252,27 +230,15 @@ int OnInit()
    ArrayInitialize(recentTradeResults, 0.0);
    LoadWeights();
 
-   // v4.0: 初期化
-   g_dailyPnL = 0;
-   g_lastDay = 0;
-   g_circuitBreaker = false;
-   g_pyramidCount = 0;
-
-   Print("AntigravityMTF EA [GOLD] v4.0 初期化完了");
+   Print("AntigravityMTF EA [GOLD] v3.0 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
-   Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
-         " Div=", (UseDivergence ? "有効" : "無効"),
-         " S/R=", (UseSRLevels ? "有効" : "無効"),
-         " Candle=", (UseCandlePatterns ? "有効" : "無効"));
-   Print("   v3.0: Chandelier=", (UseChandelierExit ? "有効" : "無効"),
-         " AdaptSize=", (UseAdaptiveSizing ? "有効" : "無効"));
-   Print("   v4.0 防御: News=", (UseNewsFilter ? "有効" : "無効"),
-         " Weekend=", (UseWeekendClose ? "有効" : "無効"),
-         " CircuitBreaker=", DailyMaxLossPct, "% CrashATR=", CrashATRMulti, "x");
-   Print("   v4.0 攻撃: MomentumBurst=", (UseMomentumBurst ? "有効" : "無効"),
-         " VolClimax=", (UseVolumeClimax ? "有効" : "無効"),
-         " Pyramid=", MaxPyramidPositions, " Reversal=", (UseReversalMode ? "有効" : "無効"));
+   Print("   USD相関: ", (g_UseCorrelation ? "有効" : "無効"));
+   Print("   ダイバージェンス: ", (UseDivergence ? "有効" : "無効"));
+   Print("   S/Rレベル: ", (UseSRLevels ? "有効" : "無効"));
+   Print("   ローソク足パターン: ", (UseCandlePatterns ? "有効" : "無効"));
+   Print("   シャンデリアイグジット: ", (UseChandelierExit ? "有効" : "無効"));
+   Print("   適応的サイジング: ", (UseAdaptiveSizing ? "有効" : "無効"));
    return INIT_SUCCEEDED;
 }
 
@@ -306,28 +272,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // v4.0: 日次サーキットブレーカーリセット
-   MqlDateTime dtNow;
-   TimeCurrent(dtNow);
-   if(dtNow.day != g_lastDay)
-   {
-      g_lastDay = dtNow.day;
-      g_dailyPnL = 0;
-      g_circuitBreaker = false;
-   }
-   if(g_circuitBreaker) return;  // 日次損失上限到達
-
    ManageOpenPositions();
-
-   // v4.0: 塩漬けトレード決済チェック
-   CheckStaleTradeExit();
-
-   // v4.0: 週末クローズ
-   if(IsWeekendClose())
-   {
-      CloseAllPositions();
-      return;
-   }
 
    datetime currentBar = iTime(_Symbol, PERIOD_M15, 0);
    if(currentBar == lastBarTime) return;
@@ -336,15 +281,7 @@ void OnTick()
    if(!IsTradeAllowed()) return;
    if(!CheckTimeFilter()) return;
    if(!CheckSpread()) return;
-
-   // v4.0: ニュースフィルター
-   if(IsNewsTime()) return;
-
-   // v4.0: 動的スプレッドチェック
-   if(!IsDynamicSpreadOK()) return;
-
-   int posCount = CountMyPositions();
-   if(posCount >= MaxPyramidPositions) return;
+   if(CountMyPositions() >= MaxPositions) return;
 
    // SL後クールダウン
    if(lastSLTime > 0 && TimeCurrent() - lastSLTime < CooldownMinutes * 60)
@@ -354,18 +291,15 @@ void OnTick()
    double currentATR = GetCurrentATR();
    if(currentATR <= 0) return;
 
-   // v4.0: 4状態レジーム判定
-   int advRegime = GetAdvancedRegime(currentATR);
-   if(advRegime == 0) return;  // Crash → 新規エントリー禁止
-
    int volRegime = GetVolatilityRegime(currentATR);
+   if(volRegime == 0) return;  // 低ボラ → スキップ
 
    // 動的リスクスケーリング
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    if(balance > peakBalance) peakBalance = balance;
    double currentDD = (peakBalance > 0) ? (peakBalance - balance) / peakBalance * 100 : 0;
 
-   // ──── スコアリング（v4.0: 最大27点） ────
+   // ──── スコアリング（v3.0: 最大22点） ────
    int buyScore  = 0;
    int sellScore = 0;
    string buyReasons  = "";
@@ -463,16 +397,6 @@ void OnTick()
       else if(h4RsiSignal == -1) { sellScore += 1;  sellReasons += "H4Rv "; }
    }
 
-   // 14. v4.0: モメンタムバースト（3点）
-   int burstScore = GetMomentumBurst();
-   if(burstScore > 0)        { buyScore += 3;  buyReasons  += "BURST^ "; componentMask |= (1 << 12); }
-   else if(burstScore < 0)   { sellScore += 3;  sellReasons += "BURSTv "; componentMask |= (1 << 12); }
-
-   // 15. v4.0: ボリュームクライマックス（2点）
-   int climaxScore = GetVolumeClimax();
-   if(climaxScore > 0)       { buyScore += 2;  buyReasons  += "VCLX^ "; componentMask |= (1 << 13); }
-   else if(climaxScore < 0)  { sellScore += 2;  sellReasons += "VCLXv "; componentMask |= (1 << 13); }
-
    // Clamp scores to minimum 0
    buyScore = (int)MathMax(0, buyScore);
    sellScore = (int)MathMax(0, sellScore);
@@ -487,10 +411,6 @@ void OnTick()
 
    double slDist = currentATR * slMulti;
    double tpDist = currentATR * TP_ATR_Multi;
-
-   // v4.0: モメンタムバースト時はTP×1.5
-   if(MathAbs(burstScore) > 0)
-      tpDist *= 1.5;
 
    // SLの最小/最大制限（ポイント単位）
    double minSL = MinSL_Points * _Point;
@@ -507,100 +427,34 @@ void OnTick()
       lot = MathMax(MinLots, lot);
    }
 
-   // v4.0: ピラミッディング — 追加エントリー時はロット減衰
-   bool isPyramid = (posCount > 0);
-   if(isPyramid)
-   {
-      // 既存ポジションが利益出ているか確認
-      bool existingProfitable = true;
-      for(int pi = PositionsTotal() - 1; pi >= 0; pi--)
-      {
-         ulong pTicket = PositionGetTicket(pi);
-         if(pTicket == 0) continue;
-         if(PositionGetInteger(POSITION_MAGIC) != MagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-         if(PositionGetDouble(POSITION_PROFIT) <= 0) { existingProfitable = false; break; }
-      }
-      if(!existingProfitable) isPyramid = false;  // 利益出てなければピラミッド不可
-      else
-      {
-         double decay = MathPow(PyramidLotDecay, posCount);
-         lot = NormalizeDouble(lot * decay, 2);
-         lot = MathMax(MinLots, lot);
-      }
-   }
-
-   // 動的スコア防壁（v4.0: 27点スケール）
+   // 動的スコア防壁（v3.0: 22点スケール）
    int currentMinScore = MinEntryScore;  // default 9
-   if(currentDD >= 20.0)      currentMinScore = 18;
-   else if(currentDD >= 15.0) currentMinScore = 15;
-   else if(currentDD >= 10.0) currentMinScore = 12;
-   // v4.0: Ranging regime → +3
-   if(advRegime == 1) currentMinScore += 3;
+   if(currentDD >= 20.0)      currentMinScore = 15;
+   else if(currentDD >= 15.0) currentMinScore = 13;
+   else if(currentDD >= 10.0) currentMinScore = 11;
 
-   bool entered = false;
-
-   if((!isPyramid || posCount > 0) && buyScore >= currentMinScore && buyScore > sellScore)
+   if(buyScore >= currentMinScore && buyScore > sellScore)
    {
-      if(!isPyramid || posCount < MaxPyramidPositions)
-      {
-         double sl = NormalizeDouble(ask - slDist, _Digits);
-         double tp = NormalizeDouble(ask + tpDist, _Digits);
+      double sl = NormalizeDouble(ask - slDist, _Digits);
+      double tp = NormalizeDouble(ask + tpDist, _Digits);
 
-         if(trade.Buy(lot, _Symbol, ask, sl, tp,
-            StringFormat("GOLD BUY S:%d M:%d ATR:%.1f", buyScore, componentMask, currentATR/_Point)))
-         {
-            Print("GOLD BUY Score:", buyScore, "/27 ATR:", DoubleToString(currentATR/_Point,0),
-                  "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
-                  isPyramid ? " [PYRAMID]" : "", " [", buyReasons, "]");
-            entered = true;
-         }
-      }
+      if(trade.Buy(lot, _Symbol, ask, sl, tp,
+         StringFormat("GOLD BUY S:%d M:%d ATR:%.1f", buyScore, componentMask, currentATR/_Point)))
+         Print("GOLD BUY Score:", buyScore, "/22 ATR:", DoubleToString(currentATR/_Point,0),
+               "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
+               " [", buyReasons, "]");
    }
 
-   if(!entered && (!isPyramid || posCount > 0) && sellScore >= currentMinScore && sellScore > buyScore)
+   if(sellScore >= currentMinScore && sellScore > buyScore)
    {
-      if(!isPyramid || posCount < MaxPyramidPositions)
-      {
-         double sl = NormalizeDouble(bid + slDist, _Digits);
-         double tp = NormalizeDouble(bid - tpDist, _Digits);
+      double sl = NormalizeDouble(bid + slDist, _Digits);
+      double tp = NormalizeDouble(bid - tpDist, _Digits);
 
-         if(trade.Sell(lot, _Symbol, bid, sl, tp,
-            StringFormat("GOLD SELL S:%d M:%d ATR:%.1f", sellScore, componentMask, currentATR/_Point)))
-         {
-            Print("GOLD SELL Score:", sellScore, "/27 ATR:", DoubleToString(currentATR/_Point,0),
-                  "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
-                  isPyramid ? " [PYRAMID]" : "", " [", sellReasons, "]");
-            entered = true;
-         }
-      }
-   }
-
-   // v4.0: リバーサルモード — 通常スコア不足時にカウンタートレンド
-   if(!entered && posCount == 0)
-   {
-      int reversalDir = 0;
-      if(CheckReversal(reversalDir))
-      {
-         double revLot = NormalizeDouble(lot * 0.5, 2);
-         revLot = MathMax(MinLots, revLot);
-
-         if(reversalDir == 1)
-         {
-            double sl = NormalizeDouble(ask - slDist, _Digits);
-            double tp = NormalizeDouble(ask + tpDist, _Digits);
-            if(trade.Buy(revLot, _Symbol, ask, sl, tp,
-               StringFormat("GOLD REV-BUY M:%d", componentMask)))
-               Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2));
-         }
-         else if(reversalDir == -1)
-         {
-            double sl = NormalizeDouble(bid + slDist, _Digits);
-            double tp = NormalizeDouble(bid - tpDist, _Digits);
-            if(trade.Sell(revLot, _Symbol, bid, sl, tp,
-               StringFormat("GOLD REV-SELL M:%d", componentMask)))
-               Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2));
-         }
-      }
+      if(trade.Sell(lot, _Symbol, bid, sl, tp,
+         StringFormat("GOLD SELL S:%d M:%d ATR:%.1f", sellScore, componentMask, currentATR/_Point)))
+         Print("GOLD SELL Score:", sellScore, "/22 ATR:", DoubleToString(currentATR/_Point,0),
+               "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
+               " [", sellReasons, "]");
    }
 }
 
@@ -1484,14 +1338,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             double dealSwap   = HistoryDealGetDouble(trans.deal, DEAL_SWAP);
             double netResult  = dealProfit + dealComm + dealSwap;
 
-            // v4.0: 日次PnL追跡 + サーキットブレーカー
-            g_dailyPnL += netResult;
-            if(g_dailyPnL <= -(AccountInfoDouble(ACCOUNT_BALANCE) * DailyMaxLossPct / 100.0))
-            {
-               g_circuitBreaker = true;
-               Print("v4.0: デイリーサーキットブレーカー発動! 日次PnL: ", g_dailyPnL);
-            }
-
             recentTradeResults[tradeResultIndex] = netResult;
             tradeResultIndex = (tradeResultIndex + 1) % 50;
             if(tradeResultCount < 50) tradeResultCount++;
@@ -1529,192 +1375,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          }
       }
    }
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: ニュースフィルター (CalendarValueHistory使用)                 |
-//+------------------------------------------------------------------+
-bool IsNewsTime()
-{
-   if(!UseNewsFilter) return false;
-   MqlCalendarValue values[];
-   datetime from = TimeCurrent() - NewsBlockMinutes * 60;
-   datetime to   = TimeCurrent() + NewsBlockMinutes * 60;
-   int count = CalendarValueHistory(values, from, to);
-   for(int i = 0; i < count; i++)
-   {
-      MqlCalendarEvent event;
-      if(CalendarEventById(values[i].event_id, event))
-      {
-         if(event.importance == CALENDAR_IMPORTANCE_HIGH)
-            return true;
-      }
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: 動的スプレッドチェック                                       |
-//+------------------------------------------------------------------+
-bool IsDynamicSpreadOK()
-{
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   return (spread <= MaxDynamicSpread);
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: 週末クローズ判定                                             |
-//+------------------------------------------------------------------+
-bool IsWeekendClose()
-{
-   if(!UseWeekendClose) return false;
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   return (dt.day_of_week == 5 && dt.hour >= FridayCloseHour);
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: 全ポジション決済                                             |
-//+------------------------------------------------------------------+
-void CloseAllPositions()
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      trade.PositionClose(ticket);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: 4状態レジーム判定                                            |
-//| 0=Crash, 1=Ranging, 2=Trending, 3=Volatile                       |
-//+------------------------------------------------------------------+
-int GetAdvancedRegime(double currentATR)
-{
-   double atr[];
-   ArraySetAsSeries(atr, true);
-   if(CopyBuffer(h_m15_atr, 0, 1, VolRegime_Period, atr) < VolRegime_Period) return 2;
-
-   double sum = 0;
-   for(int i = 0; i < VolRegime_Period; i++) sum += atr[i];
-   double avgATR = sum / VolRegime_Period;
-
-   if(avgATR <= 0) return 2;
-   double ratio = currentATR / avgATR;
-
-   if(ratio >= CrashATRMulti) return 0;  // Crash
-   if(ratio <= VolRegime_Low) return 1;  // Ranging
-   if(ratio >= VolRegime_High) return 3; // Volatile
-   return 2;                              // Trending
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: 塩漬けトレード決済                                           |
-//+------------------------------------------------------------------+
-void CheckStaleTradeExit()
-{
-   if(StaleTradeHours <= 0) return;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
-      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      double hours = (double)(TimeCurrent() - openTime) / 3600.0;
-
-      if(hours >= StaleTradeHours && PositionGetDouble(POSITION_PROFIT) >= 0)
-      {
-         trade.PositionClose(ticket);
-         Print("v4.0: 塩漬けトレード決済 (", DoubleToString(hours,1), "時間経過)");
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: モメンタムバースト (全TF整合 +3点)                           |
-//+------------------------------------------------------------------+
-int GetMomentumBurst()
-{
-   if(!UseMomentumBurst) return 0;
-
-   double h4_f = GetIndicatorValue(h_h4_ma_fast, 0, 1);
-   double h4_s = GetIndicatorValue(h_h4_ma_slow, 0, 1);
-   double h1_f = GetIndicatorValue(h_h1_ma_fast, 0, 1);
-   double h1_s = GetIndicatorValue(h_h1_ma_slow, 0, 1);
-   double m15_f = GetIndicatorValue(h_m15_ma_fast, 0, 1);
-   double m15_s = GetIndicatorValue(h_m15_ma_slow, 0, 1);
-
-   if(h4_f == 0 || h4_s == 0 || h1_f == 0 || h1_s == 0 || m15_f == 0 || m15_s == 0) return 0;
-
-   bool allBull = (h4_f > h4_s) && (h1_f > h1_s) && (m15_f > m15_s);
-   bool allBear = (h4_f < h4_s) && (h1_f < h1_s) && (m15_f < m15_s);
-
-   if(allBull) return 1;
-   if(allBear) return -1;
-   return 0;
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: ボリュームクライマックス (+2点)                              |
-//+------------------------------------------------------------------+
-int GetVolumeClimax()
-{
-   if(!UseVolumeClimax) return 0;
-
-   long vol[];
-   ArraySetAsSeries(vol, true);
-   if(CopyTickVolume(_Symbol, PERIOD_M15, 0, 21, vol) < 21) return 0;
-
-   double sum = 0;
-   for(int i = 1; i <= 20; i++) sum += (double)vol[i];
-   double avgVol = sum / 20.0;
-
-   if(avgVol > 0 && (double)vol[0] > avgVol * 2.0)
-   {
-      double c0 = iClose(_Symbol, PERIOD_M15, 0);
-      double c1 = iClose(_Symbol, PERIOD_M15, 1);
-      if(c0 > c1) return 1;   // Bullish climax
-      if(c0 < c1) return -1;  // Bearish climax
-   }
-   return 0;
-}
-
-//+------------------------------------------------------------------+
-//| v4.0: リバーサルモード (カウンタートレンド)                         |
-//+------------------------------------------------------------------+
-bool CheckReversal(int &reversalDirection)
-{
-   if(!UseReversalMode) return false;
-
-   double rsi = GetIndicatorValue(h_m15_rsi, 0, 1);
-   // M15 RSIハンドルがないのでH1 RSIを使用
-   rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
-   if(rsi == 0) return false;
-
-   int divSignal = GetDivergence();
-   int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), GetCurrentATR());
-   int candleSignal = GetCandlePattern();
-
-   // Bullish reversal: RSI oversold + bullish divergence + support + bullish candle
-   if(rsi < 25 && divSignal > 0 && srSignal > 0 && candleSignal > 0)
-   {
-      reversalDirection = 1;
-      return true;
-   }
-
-   // Bearish reversal: RSI overbought + bearish divergence + resistance + bearish candle
-   if(rsi > 75 && divSignal < 0 && srSignal < 0 && candleSignal < 0)
-   {
-      reversalDirection = -1;
-      return true;
-   }
-
-   return false;
 }
 
 //+------------------------------------------------------------------+

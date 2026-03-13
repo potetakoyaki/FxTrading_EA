@@ -1,11 +1,8 @@
 """
-AntigravityMTF EA Gold v4.0 -- Backtester (6 months)
+AntigravityMTF EA Gold v3.0 -- Backtester (6 months)
 ATR-based dynamic SL/TP, volatility regime, session bonus, momentum, partial close
 v3.0: USD Correlation, RSI Divergence, S/R Levels, Candle Patterns, H4 RSI,
       Chandelier Exit, Equity Curve Filter, Adaptive Sizing (Half-Kelly)
-v4.0: News Filter, Dynamic Spread, Weekend Close, 4-State Regime (Crash/Ranging/Trending/Volatile),
-      Stale Trade Exit, Daily Circuit Breaker, Momentum Burst (+3pt), Volume Climax (+2pt),
-      Pyramiding (up to 3), Reversal Mode, Risk Metrics (Sharpe/Sortino/Calmar)
 """
 
 import pandas as pd
@@ -20,8 +17,8 @@ class GoldConfig:
     SYMBOL = "GC=F"
     INITIAL_BALANCE = 100_000  # 10万円
     RISK_PERCENT = 0.3         # v2.0: 0.3%
-    MAX_POSITIONS = 3          # v4.0: changed from 1 for pyramiding
-    MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/27
+    MAX_POSITIONS = 1
+    MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/22
     COOLDOWN_BARS = 16         # SL後16本(=4時間)エントリー禁止
     MAX_SPREAD_POINTS = 50
     POINT = 0.01               # Gold 1point = $0.01
@@ -116,23 +113,6 @@ class GoldConfig:
     KELLY_FRACTION = 0.5
     KELLY_MIN_RISK = 0.1
     KELLY_MAX_RISK = 1.0
-
-    # v4.0 Defense
-    USE_NEWS_FILTER = True
-    NEWS_BLOCK_MINUTES = 30
-    MAX_DYNAMIC_SPREAD = 80
-    USE_WEEKEND_CLOSE = True
-    FRIDAY_CLOSE_HOUR = 20
-    STALE_TRADE_HOURS = 48
-    DAILY_MAX_LOSS_PCT = 2.0
-    CRASH_ATR_MULTI = 3.0
-
-    # v4.0 Attack
-    USE_MOMENTUM_BURST = True
-    USE_VOLUME_CLIMAX = True
-    MAX_PYRAMID_POSITIONS = 3
-    PYRAMID_LOT_DECAY = 0.5
-    USE_REVERSAL_MODE = True
 
 
 # ============================================================
@@ -460,7 +440,6 @@ def fetch_gold_data(months=6):
     m15_list = []
     for idx, row in h1_raw.iterrows():
         o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-        vol = row.get("Volume", 0)
         for j in range(4):
             frac = j / 4
             frac_next = (j + 1) / 4
@@ -469,8 +448,7 @@ def fetch_gold_data(months=6):
             seg_h = max(seg_o, seg_c) + (h - max(o, c)) * (1 - abs(frac - 0.5) * 2) * 0.5
             seg_l = min(seg_o, seg_c) - (min(o, c) - l) * (1 - abs(frac - 0.5) * 2) * 0.5
             ts = idx + timedelta(minutes=j * 15)
-            m15_list.append({"Open": seg_o, "High": seg_h, "Low": seg_l, "Close": seg_c,
-                             "Volume": vol / 4, "time": ts})
+            m15_list.append({"Open": seg_o, "High": seg_h, "Low": seg_l, "Close": seg_c, "time": ts})
 
     m15_df = pd.DataFrame(m15_list).set_index("time")
 
@@ -527,7 +505,7 @@ def _generate_from_daily(daily, months):
 
 
 # ============================================================
-# Backtest Engine (Gold v4.0)
+# Backtest Engine (Gold v3.0)
 # ============================================================
 class GoldBacktester:
     def __init__(self, cfg):
@@ -540,133 +518,7 @@ class GoldBacktester:
         self.cooldown_until = 0
         # v3.0 additions
         self.recent_trade_pnls = []
-        self.component_stats = {i: {"wins": 0, "total": 0} for i in range(15)}  # v4.0: 15 components
-        # v4.0 tracking
-        self.daily_pnl = 0.0
-        self.current_day = None
-        self.circuit_breaker = False
-        self.news_blocks = 0
-        self.crash_skips = 0
-        self.weekend_closes = 0
-        self.spread_blocks = 0
-
-    # ---- v4.0 Defense Methods ----
-
-    def simulate_news_filter(self, timestamp):
-        """Simulate news filter - block trading around known high-impact times"""
-        if not self.cfg.USE_NEWS_FILTER:
-            return False
-        hour = timestamp.hour if hasattr(timestamp, 'hour') else 12
-        weekday = timestamp.weekday() if hasattr(timestamp, 'weekday') else 0
-        day = timestamp.day if hasattr(timestamp, 'day') else 15
-        # NFP: First Friday of month, 13:30 UTC
-        if weekday == 4 and day <= 7 and 13 <= hour <= 14:
-            return True
-        # FOMC: Wednesday, 19:00 UTC
-        if weekday == 2 and 18 <= hour <= 20:
-            return True
-        # ECB: Thursday, 12:45 UTC
-        if weekday == 3 and 12 <= hour <= 13:
-            return True
-        # CPI: Around 10th-15th of month, 13:30 UTC
-        if 10 <= day <= 15 and hour == 13:
-            return True
-        return False
-
-    def check_dynamic_spread(self, current_atr, atr_avg):
-        """Simulate spread check - widen during volatile periods"""
-        if atr_avg > 0 and current_atr / atr_avg > 2.0:
-            return False  # Spread likely too wide
-        return True
-
-    def check_weekend(self, timestamp):
-        """Check if it's Friday close time"""
-        if not self.cfg.USE_WEEKEND_CLOSE:
-            return False
-        weekday = timestamp.weekday() if hasattr(timestamp, 'weekday') else 0
-        hour = timestamp.hour if hasattr(timestamp, 'hour') else 12
-        return weekday == 4 and hour >= self.cfg.FRIDAY_CLOSE_HOUR
-
-    def get_advanced_regime(self, current_atr, atr_avg):
-        """Return regime: 0=Crash, 1=Ranging, 2=Trending, 3=Volatile"""
-        if atr_avg <= 0:
-            return 2
-        ratio = current_atr / atr_avg
-        if ratio >= self.cfg.CRASH_ATR_MULTI:
-            return 0  # Crash
-        if ratio <= self.cfg.VOL_REGIME_LOW:
-            return 1  # Ranging
-        if ratio >= self.cfg.VOL_REGIME_HIGH:
-            return 3  # Volatile
-        return 2  # Trending
-
-    def check_stale_trade(self, pos, bar_idx):
-        """Check if trade has been open too long"""
-        if self.cfg.STALE_TRADE_HOURS <= 0:
-            return False
-        bars_elapsed = bar_idx - pos.get('entry_bar', bar_idx)
-        hours_elapsed = bars_elapsed * 0.25  # M15 bars = 0.25 hours
-        return hours_elapsed >= self.cfg.STALE_TRADE_HOURS
-
-    def check_daily_circuit(self):
-        """Check if daily loss limit hit"""
-        max_loss = self.balance * self.cfg.DAILY_MAX_LOSS_PCT / 100.0
-        return self.daily_pnl <= -max_loss
-
-    # ---- v4.0 Attack Methods ----
-
-    def get_momentum_burst(self, h4_row, h1_curr, m15_curr, m15_prev):
-        """Check if all timeframes are aligned for momentum burst (+3 points)"""
-        if not self.cfg.USE_MOMENTUM_BURST:
-            return 0
-        h4_bull = pd.notna(h4_row.get("ma_fast")) and h4_row["ma_fast"] > h4_row["ma_slow"]
-        h4_bear = pd.notna(h4_row.get("ma_fast")) and h4_row["ma_fast"] < h4_row["ma_slow"]
-        h1_bull = pd.notna(h1_curr.get("ma_fast")) and h1_curr["ma_fast"] > h1_curr["ma_slow"]
-        h1_bear = pd.notna(h1_curr.get("ma_fast")) and h1_curr["ma_fast"] < h1_curr["ma_slow"]
-        m15_bull = pd.notna(m15_curr.get("ma_fast")) and m15_curr["ma_fast"] > m15_curr["ma_slow"]
-        m15_bear = pd.notna(m15_curr.get("ma_fast")) and m15_curr["ma_fast"] < m15_curr["ma_slow"]
-
-        if h4_bull and h1_bull and m15_bull:
-            return 3
-        if h4_bear and h1_bear and m15_bear:
-            return -3
-        return 0
-
-    def get_volume_climax(self, m15_df, i):
-        """Detect volume climax (2x average)"""
-        if not self.cfg.USE_VOLUME_CLIMAX:
-            return 0
-        if i < 21 or 'Volume' not in m15_df.columns:
-            return 0
-        current_vol = m15_df['Volume'].iloc[i]
-        avg_vol = m15_df['Volume'].iloc[i-20:i].mean()
-        if avg_vol > 0 and current_vol > avg_vol * 2.0:
-            row = m15_df.iloc[i]
-            if row['Close'] > row['Open']:
-                return 2   # Bullish climax
-            elif row['Close'] < row['Open']:
-                return -2  # Bearish climax
-        return 0
-
-    def check_reversal(self, h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg):
-        """Check for reversal setup: RSI extreme + divergence + S/R + candle pattern"""
-        if not cfg.USE_REVERSAL_MODE:
-            return 0
-        rsi = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
-
-        h1_closes_series = h1_df[h1_mask]["Close"]
-        h1_rsi_series = h1_df[h1_mask]["rsi"]
-        div_signal = get_divergence(h1_closes_series, h1_rsi_series, cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
-        sr_signal = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
-        candle_signal = get_candle_pattern(h1_df, ct)
-
-        # Bullish reversal: RSI oversold + bullish divergence + support + bullish candle
-        if rsi < 25 and div_signal > 0 and sr_signal > 0 and candle_signal > 0:
-            return 1
-        # Bearish reversal: RSI overbought + bearish divergence + resistance + bearish candle
-        if rsi > 75 and div_signal < 0 and sr_signal < 0 and candle_signal < 0:
-            return -1
-        return 0
+        self.component_stats = {i: {"wins": 0, "total": 0} for i in range(13)}
 
     def run(self, h4_df, h1_df, m15_df, usdjpy_df=None):
         cfg = self.cfg
@@ -715,25 +567,12 @@ class GoldBacktester:
         print(f"   v2.0: VolRegime={cfg.VOL_REGIME_LOW}/{cfg.VOL_REGIME_HIGH} Session={cfg.USE_SESSION_BONUS} Momentum={cfg.USE_MOMENTUM} PartialClose={cfg.USE_PARTIAL_CLOSE}")
         print(f"   v3.0: Corr={cfg.USE_CORRELATION} Div={cfg.USE_DIVERGENCE} SR={cfg.USE_SR_LEVELS} Candle={cfg.USE_CANDLE_PATTERNS} H4RSI={cfg.USE_H4_RSI}")
         print(f"   v3.0: Chandelier={cfg.USE_CHANDELIER_EXIT} EquityCurve={cfg.USE_EQUITY_CURVE} AdaptSize={cfg.USE_ADAPTIVE_SIZING}")
-        print(f"   v4.0 Defense: News={cfg.USE_NEWS_FILTER} Weekend={cfg.USE_WEEKEND_CLOSE} CircuitBreaker={cfg.DAILY_MAX_LOSS_PCT}% CrashATR={cfg.CRASH_ATR_MULTI}x")
-        print(f"   v4.0 Attack: MomentumBurst={cfg.USE_MOMENTUM_BURST} VolClimax={cfg.USE_VOLUME_CLIMAX} Pyramid={cfg.MAX_PYRAMID_POSITIONS} Reversal={cfg.USE_REVERSAL_MODE}")
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
             cc = m15_df["Close"].iloc[i]
             ch = m15_df["High"].iloc[i]
             cl = m15_df["Low"].iloc[i]
-
-            # v4.0: Daily circuit breaker reset
-            bar_day = ct.date() if hasattr(ct, 'date') else ct
-            if bar_day != self.current_day:
-                self.current_day = bar_day
-                self.daily_pnl = 0.0
-                self.circuit_breaker = False
-
-            if self.circuit_breaker:
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
 
             self._manage_positions(ch, cl, cc, ct, i, m15_df)
 
@@ -742,31 +581,18 @@ class GoldBacktester:
             current_dd = (self.peak_balance - self.balance) / self.peak_balance * 100 if self.peak_balance > 0 else 0
 
             hour = ct.hour if hasattr(ct, "hour") else 12
-
-            # v4.0: Weekend close - close all positions
-            if self.check_weekend(ct):
-                if self.open_positions:
-                    for pos in list(self.open_positions):
-                        self._close_position(pos, cc, ct, "Weekend", i)
-                    self.weekend_closes += 1
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
-
             if hour < cfg.TRADE_START_HOUR or hour >= cfg.TRADE_END_HOUR:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
             if hasattr(ct, "dayofweek") and ct.dayofweek == 4 and hour >= 18:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
-
-            # Cooldown after SL
-            if i < self.cooldown_until:
+            if len(self.open_positions) >= cfg.MAX_POSITIONS:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
-            # v4.0: News filter
-            if self.simulate_news_filter(ct):
-                self.news_blocks += 1
+            # Cooldown after SL
+            if i < self.cooldown_until:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
@@ -777,20 +603,11 @@ class GoldBacktester:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
-            # v4.0: Dynamic spread check
-            if not self.check_dynamic_spread(current_atr, current_atr_avg):
-                self.spread_blocks += 1
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
-
-            # v4.0: Advanced 4-state regime
-            regime = self.get_advanced_regime(current_atr, current_atr_avg)
-            if regime == 0:  # Crash - no new entries, only manage
-                self.crash_skips += 1
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
-
             vol_ratio = current_atr / current_atr_avg
+            # Low volatility regime: skip
+            if vol_ratio < cfg.VOL_REGIME_LOW:
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                continue
 
             # High volatility regime: SL bonus
             sl_multi = cfg.SL_ATR_MULTI
@@ -824,10 +641,10 @@ class GoldBacktester:
             m15_curr = m15_df.iloc[i]
             m15_prev = m15_df.iloc[i - 1]
 
-            # ---- Scoring (Gold EA v4.0: max 27 points) ----
+            # ---- Scoring (Gold EA v3.0: max 22 points) ----
             buy_score = 0
             sell_score = 0
-            component_mask = [0] * 15  # v4.0: 15 components
+            component_mask = [0] * 13
 
             # 1. H4 Trend (3 pts)
             if pd.notna(h4_row.get("adx")) and h4_row["adx"] >= cfg.H4_ADX_THRESHOLD:
@@ -968,38 +785,18 @@ class GoldBacktester:
                     sell_score += 1
                     component_mask[12] = -1
 
-            # 14. v4.0: Momentum Burst (+3)
-            burst = self.get_momentum_burst(h4_row, h1_curr, m15_curr, m15_prev)
-            if burst > 0:
-                buy_score += burst
-                component_mask[13] = 1
-            elif burst < 0:
-                sell_score += abs(burst)
-                component_mask[13] = -1
-
-            # 15. v4.0: Volume Climax (+2)
-            climax = self.get_volume_climax(m15_df, i)
-            if climax > 0:
-                buy_score += climax
-                component_mask[14] = 1
-            elif climax < 0:
-                sell_score += abs(climax)
-                component_mask[14] = -1
-
             # Clamp to 0
             buy_score = max(0, buy_score)
             sell_score = max(0, sell_score)
 
-            # ---- v4.0: Dynamic score barrier (27-point scale) ----
-            dynamic_min_score = cfg.MIN_SCORE  # 9
+            # ---- Dynamic score barrier (v3.0: 22-point scale) ----
+            current_min_score = cfg.MIN_SCORE  # 9
             if current_dd >= 20.0:
-                dynamic_min_score = 18
+                current_min_score = 15
             elif current_dd >= 15.0:
-                dynamic_min_score = 15
+                current_min_score = 13
             elif current_dd >= 10.0:
-                dynamic_min_score = 12
-            if regime == 1:  # Ranging
-                dynamic_min_score += 3
+                current_min_score = 11
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -1008,65 +805,15 @@ class GoldBacktester:
                 if np.mean(recent) < 0:
                     lot_multiplier = cfg.EQUITY_REDUCE_FACTOR
 
-            # v4.0: Momentum burst TP multiplier
-            tp_multi = 1.5 if abs(burst) == 3 else 1.0
-            adjusted_tp_points = dynamic_tp_points * tp_multi
-
-            # ---- v4.0: Pyramiding support ----
-            pos_count = len(self.open_positions)
-            can_enter = pos_count < cfg.MAX_PYRAMID_POSITIONS
-            is_pyramid = pos_count > 0
-            pyramid_ok = True
-
-            if is_pyramid:
-                # Check if existing positions are profitable
-                for pos in self.open_positions:
-                    if pos["direction"] == "BUY":
-                        unrealized = cc - pos["entry"]
-                    else:
-                        unrealized = pos["entry"] - cc
-                    if unrealized <= 0:
-                        pyramid_ok = False
-                        break
-
             # ---- Entry ----
-            entry_type = "normal"
-            entered = False
-
-            if can_enter and (not is_pyramid or pyramid_ok):
-                pyramid_lot_multi = 1.0
-                if is_pyramid:
-                    pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
-                    entry_type = "pyramid"
-
-                if buy_score >= dynamic_min_score and buy_score > sell_score:
-                    self._open_trade("BUY", cc, ct, buy_score, current_dd,
-                                     dynamic_sl_points, adjusted_tp_points, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
-                                     entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i)
-                    entered = True
-                elif sell_score >= dynamic_min_score and sell_score > buy_score:
-                    self._open_trade("SELL", cc, ct, sell_score, current_dd,
-                                     dynamic_sl_points, adjusted_tp_points, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
-                                     entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i)
-                    entered = True
-
-            # v4.0: Reversal mode - only when no normal entry and no open positions
-            if not entered and pos_count == 0:
-                reversal = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
-                if reversal == 1:
-                    self._open_trade("BUY", cc, ct, 0, current_dd,
-                                     dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5, component_mask,
-                                     entry_type="reversal", entry_bar=i)
-                elif reversal == -1:
-                    self._open_trade("SELL", cc, ct, 0, current_dd,
-                                     dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5, component_mask,
-                                     entry_type="reversal", entry_bar=i)
+            if buy_score >= current_min_score and buy_score > sell_score:
+                self._open_trade("BUY", cc, ct, buy_score, current_dd,
+                                 dynamic_sl_points, dynamic_tp_points, current_atr,
+                                 lot_multiplier, component_mask)
+            elif sell_score >= current_min_score and sell_score > buy_score:
+                self._open_trade("SELL", cc, ct, sell_score, current_dd,
+                                 dynamic_sl_points, dynamic_tp_points, current_atr,
+                                 lot_multiplier, component_mask)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
 
@@ -1119,8 +866,7 @@ class GoldBacktester:
 
     def _open_trade(self, direction, price, time, score, dd_pct,
                     sl_points, tp_points, current_atr,
-                    lot_multiplier=1.0, component_mask=None,
-                    entry_type="normal", momentum_burst=False, entry_bar=0):
+                    lot_multiplier=1.0, component_mask=None):
         cfg = self.cfg
         pt = cfg.POINT
         spread = cfg.MAX_SPREAD_POINTS * pt * 0.5  # average spread
@@ -1134,7 +880,7 @@ class GoldBacktester:
             tp = entry - tp_points * pt
 
         lot = self._calc_lot(dd_pct, sl_points)
-        # v3.0: Apply equity curve lot multiplier + v4.0 pyramid decay
+        # v3.0: Apply equity curve lot multiplier
         lot = max(cfg.MIN_LOT, round(lot * lot_multiplier, 2))
 
         tp_dist = tp_points * pt  # TP distance in price units
@@ -1154,9 +900,6 @@ class GoldBacktester:
             "tp_points": tp_points,
             "tp_dist": tp_dist,
             "atr_at_entry": current_atr,
-            "entry_type": entry_type,
-            "momentum_burst": momentum_burst,
-            "entry_bar": entry_bar,
         }
         # v3.0: Store component mask
         if component_mask is not None:
@@ -1167,17 +910,6 @@ class GoldBacktester:
         cfg = self.cfg
         pt = cfg.POINT
         for pos in list(self.open_positions):
-            # v4.0: Stale trade exit
-            if self.check_stale_trade(pos, bar_idx):
-                # Only close if not losing (close at current price if profitable or breakeven)
-                if pos["direction"] == "BUY":
-                    unrealized = close - pos["entry"]
-                else:
-                    unrealized = pos["entry"] - close
-                if unrealized >= 0:
-                    self._close_position(pos, close, time, "Stale", bar_idx)
-                    continue
-
             if pos["direction"] == "BUY":
                 # SL check
                 if low <= pos["sl"]:
@@ -1209,7 +941,6 @@ class GoldBacktester:
                             pnl_jpy = pnl_usd * 150.0
                             self.balance += pnl_jpy
                             self.peak_balance = max(self.peak_balance, self.balance)
-                            self.daily_pnl += pnl_jpy
                             self.trades.append({
                                 "open_time": pos["open_time"],
                                 "close_time": time,
@@ -1223,8 +954,6 @@ class GoldBacktester:
                                 "balance": round(self.balance, 0),
                                 "reason": "Partial",
                                 "score": pos["score"],
-                                "entry_type": pos.get("entry_type", "normal"),
-                                "momentum_burst": pos.get("momentum_burst", False),
                             })
                             # v3.0: Track partial close PnL
                             self.recent_trade_pnls.append(pnl_jpy)
@@ -1284,7 +1013,6 @@ class GoldBacktester:
                             pnl_jpy = pnl_usd * 150.0
                             self.balance += pnl_jpy
                             self.peak_balance = max(self.peak_balance, self.balance)
-                            self.daily_pnl += pnl_jpy
                             self.trades.append({
                                 "open_time": pos["open_time"],
                                 "close_time": time,
@@ -1298,8 +1026,6 @@ class GoldBacktester:
                                 "balance": round(self.balance, 0),
                                 "reason": "Partial",
                                 "score": pos["score"],
-                                "entry_type": pos.get("entry_type", "normal"),
-                                "momentum_burst": pos.get("momentum_burst", False),
                             })
                             # v3.0: Track partial close PnL
                             self.recent_trade_pnls.append(pnl_jpy)
@@ -1347,11 +1073,6 @@ class GoldBacktester:
         self.balance += pnl_jpy
         self.peak_balance = max(self.peak_balance, self.balance)
 
-        # v4.0: Track daily PnL for circuit breaker
-        self.daily_pnl += pnl_jpy
-        if self.check_daily_circuit():
-            self.circuit_breaker = True
-
         # v3.0: Track PnL for equity curve filter and adaptive sizing
         self.recent_trade_pnls.append(pnl_jpy)
 
@@ -1377,8 +1098,6 @@ class GoldBacktester:
             "balance": round(self.balance, 0),
             "reason": reason,
             "score": pos["score"],
-            "entry_type": pos.get("entry_type", "normal"),
-            "momentum_burst": pos.get("momentum_burst", False),
         })
         self.open_positions.remove(pos)
 
@@ -1395,7 +1114,7 @@ class GoldBacktester:
         return total
 
     def analyze_components(self):
-        """v4.0: Print win rate analysis for each scoring component."""
+        """v3.0: Print win rate analysis for each scoring component."""
         names = [
             "1. H4 Trend (3pt)",
             "2. H1 MA Dir (2pt)",
@@ -1410,13 +1129,11 @@ class GoldBacktester:
             "11. S/R Level (+/-1pt)",
             "12. Candle Pattern (1pt)",
             "13. H4 RSI Align (1pt)",
-            "14. Momentum Burst (3pt)",
-            "15. Volume Climax (2pt)",
         ]
-        print("\n  Component Analysis (v4.0):")
+        print("\n  Component Analysis (v3.0):")
         print(f"  {'Component':<30} {'Trades':>7} {'Wins':>7} {'Win%':>7}")
         print("  " + "-" * 55)
-        for i in range(15):
+        for i in range(13):
             stats = self.component_stats[i]
             total = stats["total"]
             wins = stats["wins"]
@@ -1459,34 +1176,6 @@ class GoldBacktester:
             pnl=("pnl_jpy", "sum")
         )
 
-        # v4.0: Risk Metrics
-        returns = df["pnl_jpy"]
-        sharpe = sortino = calmar = 0
-        max_consec_wins = max_consec_losses = 0
-        expectancy = 0
-
-        if len(returns) > 1:
-            sharpe = returns.mean() / returns.std() * np.sqrt(252 * 4) if returns.std() > 0 else 0
-            downside = returns[returns < 0].std()
-            sortino = returns.mean() / downside * np.sqrt(252 * 4) if pd.notna(downside) and downside > 0 else 0
-
-            total_return_pct = (self.balance / self.cfg.INITIAL_BALANCE - 1) * 100
-            months_count = max(tm, 1)
-            annual_return = total_return_pct / months_count * 12
-            calmar = annual_return / max_dd if max_dd > 0 else 0
-
-            expectancy = returns.mean()
-
-            # Consecutive stats
-            current_streak = 0
-            for t_pnl in returns:
-                if t_pnl > 0:
-                    current_streak = current_streak + 1 if current_streak > 0 else 1
-                else:
-                    current_streak = current_streak - 1 if current_streak < 0 else -1
-                max_consec_wins = max(max_consec_wins, current_streak)
-                max_consec_losses = min(max_consec_losses, current_streak)
-
         return {
             "Period": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
             "Initial Balance": f"{self.cfg.INITIAL_BALANCE:,.0f} JPY",
@@ -1501,12 +1190,6 @@ class GoldBacktester:
             "PF": f"{pf:.2f}" if pf != float("inf") else "INF",
             "Max DD": f"{max_dd:.1f}% ({max_dd_jpy:,.0f} JPY)",
             "Monthly WR": f"{pm}/{tm} ({pm/tm*100:.0f}%)" if tm > 0 else "N/A",
-            "Sharpe": f"{sharpe:.2f}",
-            "Sortino": f"{sortino:.2f}",
-            "Calmar": f"{calmar:.2f}",
-            "Max Consec Wins": max_consec_wins,
-            "Max Consec Losses": abs(max_consec_losses),
-            "Expectancy": f"{expectancy:+,.0f} JPY/trade",
             "Monthly": monthly.to_dict(),
             "ByReason": reason_stats.to_dict(),
         }
@@ -1528,7 +1211,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print(" AntigravityMTF EA [GOLD] v4.0 Backtest Results (6 months)")
+        print(" AntigravityMTF EA [GOLD] v3.0 Backtest Results (6 months)")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "Monthly":
@@ -1546,32 +1229,15 @@ if __name__ == "__main__":
             else:
                 print(f"  {k}: {v}")
 
-        # v4.0: Component analysis
+        # v3.0: Component analysis
         bt.analyze_components()
-
-        # v4.0: Defense stats
-        print(f"\n  --- v4.0 Defense Stats ---")
-        print(f"  News filter blocks:   {bt.news_blocks}")
-        print(f"  Crash regime skips:   {bt.crash_skips}")
-        print(f"  Weekend closes:       {bt.weekend_closes}")
-        print(f"  Spread blocks:        {bt.spread_blocks}")
-        print(f"  Circuit breaker days: {sum(1 for t in bt.trades if t.get('reason') == 'CircuitBreaker')}")
-
-        # v4.0: Attack stats
-        reversals = sum(1 for t in bt.trades if t.get('entry_type') == 'reversal')
-        pyramids = sum(1 for t in bt.trades if t.get('entry_type') == 'pyramid')
-        bursts = sum(1 for t in bt.trades if t.get('momentum_burst', False))
-        print(f"\n  --- v4.0 Attack Stats ---")
-        print(f"  Reversal trades:      {reversals}")
-        print(f"  Pyramid entries:      {pyramids}")
-        print(f"  Momentum burst trades:{bursts}")
 
         # Last 10 trades
         print(f"\n  Trade Details (last 10):")
-        print(f"  {'DateTime':<20} {'Dir':<5} {'Entry':>10} {'Exit':>10} {'Lot':>5} {'PnL(pt)':>8} {'PnL(JPY)':>10} {'Balance':>12} {'Reason':<10} {'Type':<8}")
-        print("  " + "-" * 110)
+        print(f"  {'DateTime':<20} {'Dir':<5} {'Entry':>10} {'Exit':>10} {'Lot':>5} {'PnL(pt)':>8} {'PnL(JPY)':>10} {'Balance':>12} {'Reason':<10} {'Score':<5}")
+        print("  " + "-" * 105)
         for t in bt.trades[-10:]:
-            print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>10.2f} {t['exit']:>10.2f} {t['lot']:>5.2f} {t['pnl_pts']:>8.0f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<10} {t.get('entry_type','normal'):<8}")
+            print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>10.2f} {t['exit']:>10.2f} {t['lot']:>5.2f} {t['pnl_pts']:>8.0f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<10} {t['score']:<5}")
     else:
         print("[WARN] No trades occurred")
         print("   Try lowering MinScore or adjusting parameters")
