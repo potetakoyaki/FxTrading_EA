@@ -4,7 +4,7 @@
 //|            一目均衡表 + UT Bot/SMC + RSI/ATR                      |
 //+------------------------------------------------------------------+
 #property copyright "ThreeLayer Trading System"
-#property version   "1.00"
+#property version   "1.10"
 #property description "3層フィルターEA: 一目均衡表(環境) + UT Bot+SMC(エントリー) + RSI+ATR(フィルター)"
 
 #include <Trade/Trade.mqh>
@@ -18,7 +18,7 @@ input int    Ichi_Kijun        = 26;      // 基準線期間
 input int    Ichi_SenkouB      = 52;      // 先行スパンB期間
 
 input group "=== 第2層: UT Bot Alerts ==="
-input double UT_KeyValue       = 1.5;     // UT Bot KeyValue
+input double UT_KeyValue       = 2.0;     // UT Bot KeyValue ★偽シグナル削減
 input int    UT_ATR_Period     = 10;      // UT Bot ATR期間
 
 input group "=== 第2層: SMC（構造分析） ==="
@@ -33,9 +33,9 @@ input int    ATR_Period        = 14;      // ATR期間
 input double ATR_MinThreshold  = 2.0;     // ATR最低閾値（低ボラ排除）
 
 input group "=== 資金管理 ==="
-input double RiskPercent       = 2.0;     // 1トレードリスク（口座の%）
-input double SL_ATR_Multi      = 1.5;     // SL = ATR × この倍率
-input double TP_ATR_Multi      = 2.5;     // TP = ATR × この倍率
+input double RiskPercent       = 1.0;     // 1トレードリスク（口座の%） ★DD抑制
+input double SL_ATR_Multi      = 2.0;     // SL = ATR × この倍率 ★拡大
+input double TP_ATR_Multi      = 4.0;     // TP = ATR × この倍率 ★RR1:2維持
 input double MaxLots           = 5.0;     // 最大ロット
 input double MinLots           = 0.01;    // 最小ロット
 
@@ -43,6 +43,7 @@ input group "=== 一般設定 ==="
 input int    MaxPositions      = 1;       // 最大同時ポジション数
 input int    MagicNumber       = 30260313;// マジックナンバー
 input int    MaxSpread         = 50;      // 最大スプレッド(ポイント)
+input int    CooldownMinutes   = 120;     // SL後のエントリー禁止時間(分) ★追加
 
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
@@ -62,6 +63,7 @@ bool           utSellSignal;
 
 // バー管理
 datetime       lastBarTime;
+datetime       lastSLTime;      // SLクールダウン用
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -138,6 +140,10 @@ void OnTick()
 
    // ポジション数チェック
    if(CountMyPositions() >= MaxPositions) return;
+
+   // ★ SL後クールダウン
+   if(lastSLTime > 0 && TimeCurrent() - lastSLTime < CooldownMinutes * 60)
+      return;
 
    //--- インジケーター値取得 ---
    double senkouA[], senkouB[];
@@ -376,17 +382,14 @@ void CheckSMC(bool &allowBuy, bool &allowSell)
          smcBearish = true;
    }
 
-   // --- Buy許可判定 ---
-   // SMCトレンドがbullish または Bullish BOS があればOK
-   // Bearish CHoCH があれば禁止
-   if(!bearishCHoCH && (smcBullish || bullishBOS))
-      allowBuy = true;
+   // --- Buy許可判定（ブロッカー型） ---
+   // Bearish CHoCH が出ていなければBuy許可
+   // （SMCトレンド確認は不要 — 一目+UT Botで十分フィルター済み）
+   allowBuy = !bearishCHoCH;
 
-   // --- Sell許可判定 ---
-   // SMCトレンドがbearish または Bearish BOS があればOK
-   // Bullish CHoCH があれば禁止
-   if(!bullishCHoCH && (smcBearish || bearishBOS))
-      allowSell = true;
+   // --- Sell許可判定（ブロッカー型） ---
+   // Bullish CHoCH が出ていなければSell許可
+   allowSell = !bullishCHoCH;
 }
 
 //+------------------------------------------------------------------+
@@ -421,6 +424,30 @@ double CalcLotSize(double slDistance)
    lots = MathMax(MinLots, MathMin(MaxLots, lots));
 
    return NormalizeDouble(lots, 2);
+}
+
+//+------------------------------------------------------------------+
+//| SL検知 — クールダウン用                                            |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryDealSelect(trans.deal))
+      {
+         long dealMagic  = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         long dealEntry  = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+         long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+
+         if(dealMagic == MagicNumber && dealEntry == DEAL_ENTRY_OUT && dealReason == DEAL_REASON_SL)
+         {
+            lastSLTime = TimeCurrent();
+            Print("⏸️ SLクールダウン開始: ", CooldownMinutes, "分間エントリー停止");
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
