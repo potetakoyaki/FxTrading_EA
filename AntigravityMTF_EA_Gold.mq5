@@ -4,7 +4,7 @@
 //|            10万円口座 デュアル運用版（USDJPY EAと併用）              |
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "1.00"
+#property version   "1.10"
 #property description "XAUUSD専用: MTF複合分析EA (USDJPY版と併用可)"
 
 #include <Trade/Trade.mqh>
@@ -23,11 +23,11 @@ input double MaxDrawdownPct    = 6.0;     // DD 6%以上でリスク1/4
 input double DDHalfRiskPct     = 2.5;     // DD 2.5%以上でリスク1/2
 
 input group "=== 損益設定（ゴールド用: ポイント単位） ==="
-input int    StopLossPoints    = 300;     // SL (ポイント) ≒ $3.00
-input int    TakeProfitPoints  = 750;     // TP (ポイント) ≒ $7.50  RR1:2.5
-input int    TrailingStartPts  = 200;     // トレーリング開始 ≒ $2.00
-input int    TrailingStepPts   = 100;     // トレーリングステップ ≒ $1.00
-input int    BreakevenPts      = 150;     // 建値移動 ≒ $1.50
+input int    StopLossPoints    = 500;     // SL (ポイント) ≒ $5.00 ★拡大
+input int    TakeProfitPoints  = 1250;    // TP (ポイント) ≒ $12.50 RR1:2.5
+input int    TrailingStartPts  = 350;     // トレーリング開始 ≒ $3.50
+input int    TrailingStepPts   = 150;     // トレーリングステップ ≒ $1.50
+input int    BreakevenPts      = 250;     // 建値移動 ≒ $2.50
 
 input group "=== トレンドフィルター（H4足） ==="
 input int    H4_MA_Fast        = 20;      // H4 SMA短期
@@ -47,12 +47,13 @@ input int    M15_MA_Fast       = 5;       // M15 EMA短期
 input int    M15_MA_Slow       = 20;      // M15 EMA長期
 
 input group "=== スコアリング ==="
-input int    MinEntryScore     = 5;       // エントリー最低スコア 5/11
+input int    MinEntryScore     = 6;       // エントリー最低スコア 6/10 ★引き上げ
 
 input group "=== 時間フィルター ==="
 input int    TradeStartHour    = 8;       // 取引開始時間(サーバー時間)
 input int    TradeEndHour      = 22;      // 取引終了時間
 input bool   AvoidFriday       = true;    // 金曜夜のエントリー回避
+input int    CooldownMinutes   = 240;    // SL後のエントリー禁止時間(分) ★追加
 
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
@@ -63,6 +64,7 @@ int            h_h4_ma_fast, h_h4_ma_slow, h_h4_adx;
 int            h_h1_ma_fast, h_h1_ma_slow, h_h1_rsi, h_h1_bb;
 int            h_m15_ma_fast, h_m15_ma_slow;
 datetime       lastBarTime;
+datetime       lastSLTime;      // 直近SL時刻（クールダウン用）
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -138,6 +140,10 @@ void OnTick()
    if(!CheckTimeFilter()) return;
    if(!CheckSpread()) return;
    if(CountMyPositions() >= MaxPositions) return;
+
+   // ★ SL後クールダウン: 連続負けを防止
+   if(lastSLTime > 0 && TimeCurrent() - lastSLTime < CooldownMinutes * 60)
+      return;
 
    // 動的リスクスケーリング
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -432,6 +438,30 @@ void ManageOpenPositions()
             double newSL = NormalizeDouble(ask + TrailingStepPts * pointVal, _Digits);
             if(newSL < sl - 5 * pointVal || sl == 0)
                trade.PositionModify(ticket, newSL, tp);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| SL検知 — クールダウン用                                            |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryDealSelect(trans.deal))
+      {
+         long dealMagic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         long dealEntry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+         long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+
+         if(dealMagic == MagicNumber && dealEntry == DEAL_ENTRY_OUT && dealReason == DEAL_REASON_SL)
+         {
+            lastSLTime = TimeCurrent();
+            Print("⏸️ SLクールダウン開始: ", CooldownMinutes, "分間エントリー停止");
          }
       }
    }
