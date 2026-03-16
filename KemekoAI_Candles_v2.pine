@@ -1,0 +1,169 @@
+//@version=6
+indicator('Kemeko AI Candles v2', overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// ══════════════════════════════════════════
+// Inputs
+// ══════════════════════════════════════════
+int N = input.int(26, title = '期間', minval = 2, step = 2, group = 'Channel')
+float distance = input.float(1.5, '標準偏差', step = 0.01, minval = 0.3, group = 'Channel')
+string price_vol = input.string('Average Volume', '価格or平均出来高？', ['Price', 'Average Volume'])
+string labl_size = input.string('Small', 'ラベルサイズ', ['Small', 'Normal', 'Large'])
+
+// フィルター設定
+bool use_vol_filter = input.bool(true, '出来高フィルター', group = 'Filters')
+float vol_mult = input.float(1.2, '出来高倍率', step = 0.1, minval = 0.5, group = 'Filters')
+bool use_trend_filter = input.bool(true, 'トレンド強度フィルター', group = 'Filters')
+float dimen_thresh = input.float(1.4, 'フラクタル次元閾値(低い=トレンド)', step = 0.05, minval = 1.0, maxval = 2.0, group = 'Filters')
+
+// SL/TP表示
+bool show_sltp = input.bool(true, 'SL/TP目安を表示', group = 'Risk')
+float sl_mult = input.float(1.5, 'SL (ATR倍率)', step = 0.1, group = 'Risk')
+float tp_mult = input.float(2.5, 'TP (ATR倍率)', step = 0.1, group = 'Risk')
+
+// Colors
+grp_col = 'Colors'
+color color1 = input.color(#27e27b, '上昇モメンタム', group = grp_col, inline = '1')
+color color2 = input.color(#FF0080, '下降', group = grp_col, inline = '1')
+color color3 = input.color(#a2b5ca, '中立', group = grp_col)
+
+var color color_state = color3
+bool candles = true
+
+series float price = hl2
+var float Filt = na
+var float Filt1 = na
+var float Filt2 = na
+var int count1 = 0
+var int count2 = 0
+
+type vars
+    float N1
+    float N2
+    float N3
+    float HH
+    float LL
+    float Dimen
+    float alpha
+
+v = vars.new(0., 0., 0., 0., 0., 0., 0.)
+
+// ══════════════════════════════════════════
+// Fractal Dimension Calculation (FRAMA)
+// ══════════════════════════════════════════
+series float volatility = ta.sma(high - low, 200)
+series float atr14 = ta.atr(14)
+series float p_vol = switch price_vol
+    'Price' => close
+    'Average Volume' => math.round(ta.sma(volume, 10), 2)
+
+v.N3 := (ta.highest(high, N) - ta.lowest(low, N)) / N
+
+v.HH := high
+v.LL := low
+for count = 0 to N / 2 - 1 by 1
+    if high[count] > v.HH
+        v.HH := high[count]
+    if low[count] < v.LL
+        v.LL := low[count]
+v.N1 := (v.HH - v.LL) / (N / 2)
+
+v.HH := high[N / 2]
+v.LL := low[N / 2]
+for count = N / 2 to N - 1 by 1
+    if high[count] > v.HH
+        v.HH := high[count]
+    if low[count] < v.LL
+        v.LL := low[count]
+v.N2 := (v.HH - v.LL) / (N / 2)
+
+if v.N1 > 0 and v.N2 > 0 and v.N3 > 0
+    v.Dimen := (math.log(v.N1 + v.N2) - math.log(v.N3)) / math.log(2)
+
+v.alpha := math.exp(-4.6 * (v.Dimen - 1))
+v.alpha := math.max(math.min(v.alpha, 1), 0.01)
+
+Filt := na(Filt) ? price : v.alpha * price + (1 - v.alpha) * Filt[1]
+Filt := ta.sma(bar_index < N + 1 ? price : Filt, 5)
+
+Filt1 := Filt + volatility * distance
+Filt2 := Filt - volatility * distance
+
+// ══════════════════════════════════════════
+// Enhanced Signal Detection
+// ══════════════════════════════════════════
+series float vol_sma = ta.sma(volume, 20)
+bool vol_confirm = not use_vol_filter or (volume > vol_sma * vol_mult)
+bool trend_confirm = not use_trend_filter or (v.Dimen < dimen_thresh)
+
+bool break_up = ta.crossover(hlc3, Filt1) and barstate.isconfirmed and vol_confirm and trend_confirm
+bool break_dn = ta.crossunder(hlc3, Filt2) and barstate.isconfirmed and vol_confirm and trend_confirm
+
+if ta.cross(close, Filt)
+    color_state := color3
+
+switch
+    break_up =>
+        color_state := color1
+    break_dn =>
+        color_state := color2
+
+color color_c = candles ? color_state : na
+
+size = switch labl_size
+    'Small' => size.small
+    'Normal' => size.normal
+    'Large' => size.large
+
+// ══════════════════════════════════════════
+// Labels + SL/TP Lines
+// ══════════════════════════════════════════
+f_strength(float dimen) =>
+    dimen < 1.25 ? '★★★' : dimen < 1.4 ? '★★' : '★'
+
+if break_up
+    count2 := 0
+    count1 += 1
+    if count1 == 1
+        string strength = f_strength(v.Dimen)
+        string txt = '🢁\n' + str.tostring(p_vol) + '\n' + strength
+        label.new(x = bar_index, y = Filt2, text = txt, style = label.style_label_up, textcolor = color1, color = color(na), size = size)
+
+        if show_sltp
+            float sl_price = close - atr14 * sl_mult
+            line.new(bar_index, sl_price, bar_index + 20, sl_price, color = color2, style = line.style_dashed, width = 1)
+            label.new(bar_index + 20, sl_price, 'SL ' + str.tostring(math.round(sl_price, 2)), style = label.style_label_left, textcolor = color2, color = color(na), size = size.tiny)
+            float tp_price = close + atr14 * tp_mult
+            line.new(bar_index, tp_price, bar_index + 20, tp_price, color = color1, style = line.style_dashed, width = 1)
+            label.new(bar_index + 20, tp_price, 'TP ' + str.tostring(math.round(tp_price, 2)), style = label.style_label_left, textcolor = color1, color = color(na), size = size.tiny)
+
+if break_dn
+    count1 := 0
+    count2 += 1
+    if count2 == 1
+        string strength = f_strength(v.Dimen)
+        string txt = strength + '\n' + str.tostring(p_vol) + '\n🢃'
+        label.new(x = bar_index, y = Filt1, text = txt, style = label.style_label_down, textcolor = color2, color = color(na), size = size)
+
+        if show_sltp
+            float sl_price = close + atr14 * sl_mult
+            line.new(bar_index, sl_price, bar_index + 20, sl_price, color = color1, style = line.style_dashed, width = 1)
+            label.new(bar_index + 20, sl_price, 'SL ' + str.tostring(math.round(sl_price, 2)), style = label.style_label_left, textcolor = color1, color = color(na), size = size.tiny)
+            float tp_price = close - atr14 * tp_mult
+            line.new(bar_index, tp_price, bar_index + 20, tp_price, color = color2, style = line.style_dashed, width = 1)
+            label.new(bar_index + 20, tp_price, 'TP ' + str.tostring(math.round(tp_price, 2)), style = label.style_label_left, textcolor = color2, color = color(na), size = size.tiny)
+
+// ══════════════════════════════════════════
+// Plot
+// ══════════════════════════════════════════
+plotcandle(open, high, low, close, 'Candles', color_c, color_c, bordercolor = color_c, editable = false)
+
+plot(Filt, 'FRAMA', color = color.new(color3, 50), linewidth = 1)
+plot(Filt1, 'Upper Band', color = color.new(color1, 70), linewidth = 1)
+plot(Filt2, 'Lower Band', color = color.new(color2, 70), linewidth = 1)
+
+// ══════════════════════════════════════════
+// Alerts
+// ══════════════════════════════════════════
+alertcondition(break_up and count1 == 1, title = '上昇ブレイクアウト', message = 'Kemeko AI: 上昇ブレイク検出 {{ticker}} @ {{close}}')
+alertcondition(break_dn and count2 == 1, title = '下降ブレイクアウト', message = 'Kemeko AI: 下降ブレイク検出 {{ticker}} @ {{close}}')
+alertcondition(ta.cross(close, Filt), title = '中立復帰', message = 'Kemeko AI: 中立ゾーン復帰 {{ticker}}')
