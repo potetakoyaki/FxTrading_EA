@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 
 class GoldConfig:
     SYMBOL = "GC=F"
-    INITIAL_BALANCE = 100_000  # 10万円
+    INITIAL_BALANCE = 300_000  # 30万円
     RISK_PERCENT = 0.5         # v5.0: 0.3→0.5% リスク増加
     MAX_POSITIONS = 3          # v4.0: changed from 1 for pyramiding
     MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/27
