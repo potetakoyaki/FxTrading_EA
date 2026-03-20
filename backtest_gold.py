@@ -1545,8 +1545,28 @@ class GoldBacktester:
 # Main
 # ============================================================
 if __name__ == "__main__":
+    import os, sys
     cfg = GoldConfig()
-    h4, h1, m15, usdjpy = fetch_gold_data(months=6)
+
+    # Try CSV files first, fall back to yfinance
+    csv_mode = all(os.path.exists(f) for f in [
+        "XAUUSD_H4.csv", "XAUUSD_H1.csv", "XAUUSD_M15.csv"
+    ])
+
+    if csv_mode:
+        from backtest_csv import load_csv, generate_h1_from_h4, generate_m15_from_h1, merge_and_fill
+        print("[CSV] Loading from local CSV files...")
+        m15_real = load_csv("XAUUSD_M15.csv")
+        h1_real = load_csv("XAUUSD_H1.csv")
+        h4 = load_csv("XAUUSD_H4.csv")
+        usdjpy = load_csv("USDJPY_H1.csv")
+        h1_gen = generate_h1_from_h4(h4)
+        h1 = merge_and_fill(h1_real, h1_gen)
+        m15_gen = generate_m15_from_h1(h1)
+        m15 = merge_and_fill(m15_real, m15_gen)
+    else:
+        h4, h1, m15, usdjpy = fetch_gold_data(months=6)
+
     if m15 is None:
         print("[ERR] Data fetch failed")
         exit()
