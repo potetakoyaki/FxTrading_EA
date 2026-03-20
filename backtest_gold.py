@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 class GoldConfig:
     SYMBOL = "GC=F"
     INITIAL_BALANCE = 100_000  # 10万円
-    RISK_PERCENT = 0.3         # v2.0: 0.3%
+    RISK_PERCENT = 0.5         # v5.0: 0.3→0.5% リスク増加
     MAX_POSITIONS = 3          # v4.0: changed from 1 for pyramiding
     MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/27
     COOLDOWN_BARS = 16         # SL後16本(=4時間)エントリー禁止
@@ -115,7 +115,7 @@ class GoldConfig:
     KELLY_LOOKBACK = 30
     KELLY_FRACTION = 0.5
     KELLY_MIN_RISK = 0.1
-    KELLY_MAX_RISK = 1.0
+    KELLY_MAX_RISK = 1.5       # v5.0: 好調時のリスク上限引き上げ
 
     # v4.0 Defense
     USE_NEWS_FILTER = True
