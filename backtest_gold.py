@@ -28,7 +28,7 @@ class GoldConfig:
     MAX_DD_PERCENT = 6.0
     DD_HALF_RISK = 2.5
     MAX_LOT = 0.50
-    MIN_LOT = 0.01
+    MIN_LOT = 0.05             # v5.1: 初回から0.05lot
     CONTRACT_SIZE = 100        # 1lot = 100oz (standard)
 
     # ATR-based SL/TP (v2.0)
