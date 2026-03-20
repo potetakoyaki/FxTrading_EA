@@ -23,6 +23,10 @@ from backtest_usdjpy import USDJPYConfig, USDJPYBacktester
 # ============================================================
 def load_csv(filepath):
     """Load MT5 ExportHistory CSV."""
+    import os
+    if not os.path.exists(filepath):
+        print(f"  [WARN] File not found: {filepath}")
+        return None
     df = pd.read_csv(filepath, parse_dates=["DateTime"])
     df = df.rename(columns={
         "DateTime": "time",
@@ -43,6 +47,80 @@ def load_csv(filepath):
     return df
 
 
+def generate_h1_from_h4(h4_df):
+    """H4データからH1を補間生成"""
+    h1_list = []
+    for idx, row in h4_df.iterrows():
+        o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+        vol = row.get("Volume", 0)
+        for j in range(4):
+            frac = j / 4
+            frac_next = (j + 1) / 4
+            seg_o = o + (c - o) * frac
+            seg_c = o + (c - o) * frac_next
+            seg_h = max(seg_o, seg_c) + (h - max(o, c)) * (1 - abs(frac - 0.5) * 2) * 0.5
+            seg_l = min(seg_o, seg_c) - (min(o, c) - l) * (1 - abs(frac - 0.5) * 2) * 0.5
+            ts = idx + timedelta(hours=j)
+            h1_list.append({"Open": seg_o, "High": seg_h, "Low": seg_l,
+                            "Close": seg_c, "Volume": vol / 4, "time": ts})
+    return pd.DataFrame(h1_list).set_index("time")
+
+
+def generate_m15_from_h1(h1_df):
+    """H1データからM15を補間生成"""
+    m15_list = []
+    for idx, row in h1_df.iterrows():
+        o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+        vol = row.get("Volume", 0)
+        for j in range(4):
+            frac = j / 4
+            frac_next = (j + 1) / 4
+            seg_o = o + (c - o) * frac
+            seg_c = o + (c - o) * frac_next
+            seg_h = max(seg_o, seg_c) + (h - max(o, c)) * (1 - abs(frac - 0.5) * 2) * 0.5
+            seg_l = min(seg_o, seg_c) - (min(o, c) - l) * (1 - abs(frac - 0.5) * 2) * 0.5
+            ts = idx + timedelta(minutes=j * 15)
+            m15_list.append({"Open": seg_o, "High": seg_h, "Low": seg_l,
+                             "Close": seg_c, "Volume": vol / 4, "time": ts})
+    return pd.DataFrame(m15_list).set_index("time")
+
+
+def generate_h4_from_d1(d1_df):
+    """D1データからH4を補間生成"""
+    h4_list = []
+    for idx, row in d1_df.iterrows():
+        o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+        vol = row.get("Volume", 0)
+        # 1日を6本のH4に分割
+        segments = [
+            (o, max(o, o + (h - o) * 0.3), min(o, o - (o - l) * 0.1), o + (c - o) * 0.17),
+            (o + (c - o) * 0.17, max(o + (c - o) * 0.17, (o + h) / 2), min(o + (c - o) * 0.17, (o + l) / 2), o + (c - o) * 0.33),
+            (o + (c - o) * 0.33, h, (h + l) / 2, o + (c - o) * 0.5),
+            (o + (c - o) * 0.5, max(o + (c - o) * 0.5, h * 0.7 + c * 0.3), l, o + (c - o) * 0.67),
+            (o + (c - o) * 0.67, max(o + (c - o) * 0.67, (c + h) / 2), min(o + (c - o) * 0.67, (c + l) / 2), o + (c - o) * 0.83),
+            (o + (c - o) * 0.83, max(c, o + (c - o) * 0.83), min(c, o + (c - o) * 0.83), c),
+        ]
+        for j, (so, sh, sl, sc) in enumerate(segments):
+            ts = idx + timedelta(hours=j * 4)
+            h4_list.append({"Open": so, "High": sh, "Low": sl, "Close": sc,
+                            "Volume": vol / 6, "time": ts})
+    return pd.DataFrame(h4_list).set_index("time")
+
+
+def merge_and_fill(real_df, generated_df):
+    """実データと補間データを結合。実データ優先、不足分を補間で埋める"""
+    if real_df is None or len(real_df) == 0:
+        return generated_df
+    if generated_df is None or len(generated_df) == 0:
+        return real_df
+
+    # 実データにない期間を補間データで埋める
+    gen_only = generated_df[~generated_df.index.isin(real_df.index)]
+    merged = pd.concat([gen_only, real_df]).sort_index()
+    merged = merged[~merged.index.duplicated(keep='last')]
+    return merged
+
+
 # ============================================================
 # Gold Backtest (CSV)
 # ============================================================
@@ -51,15 +129,55 @@ def run_gold_backtest():
     print(" XAUUSD Backtest (MT5 Real Data)")
     print("=" * 60)
 
-    m15 = load_csv("XAUUSD_M15.csv")
-    h1 = load_csv("XAUUSD_H1.csv")
-    h4 = load_csv("XAUUSD_H4.csv")
-    usdjpy = load_csv("USDJPY_H1.csv")
+    # 各時間足を読み込み (存在しないファイルはNone)
+    m15_real = load_csv("XAUUSD_M15.csv")
+    h1_real = load_csv("XAUUSD_H1.csv")
+    h4_real = load_csv("XAUUSD_H4.csv")
+    d1_real = load_csv("XAUUSD_D1.csv")
+    usdjpy_h1 = load_csv("USDJPY_H1.csv")
+    usdjpy_h4 = load_csv("USDJPY_H4.csv")
+    usdjpy_d1 = load_csv("USDJPY_D1.csv")
 
-    print(f"  XAUUSD M15: {len(m15):,} bars ({m15.index[0]} ~ {m15.index[-1]})")
-    print(f"  XAUUSD H1:  {len(h1):,} bars")
-    print(f"  XAUUSD H4:  {len(h4):,} bars")
-    print(f"  USDJPY H1:  {len(usdjpy):,} bars")
+    # H4: 実データ + D1から補間
+    h4 = h4_real
+    if d1_real is not None:
+        h4_gen = generate_h4_from_d1(d1_real)
+        h4 = merge_and_fill(h4_real, h4_gen)
+
+    # H1: 実データ + H4から補間
+    h1 = h1_real
+    if h4 is not None:
+        h1_gen = generate_h1_from_h4(h4)
+        h1 = merge_and_fill(h1_real, h1_gen)
+
+    # M15: 実データ + H1から補間
+    m15 = m15_real
+    if h1 is not None:
+        m15_gen = generate_m15_from_h1(h1)
+        m15 = merge_and_fill(m15_real, m15_gen)
+
+    # USDJPY: H1実データ + H4/D1から補間
+    usdjpy = usdjpy_h1
+    if usdjpy_h4 is not None:
+        usdjpy_h1_gen = generate_h1_from_h4(usdjpy_h4)
+        usdjpy = merge_and_fill(usdjpy_h1, usdjpy_h1_gen)
+    if usdjpy_d1 is not None and usdjpy is None:
+        usdjpy_h4_gen = generate_h4_from_d1(usdjpy_d1)
+        usdjpy_h1_gen = generate_h1_from_h4(usdjpy_h4_gen)
+        usdjpy = merge_and_fill(usdjpy, usdjpy_h1_gen)
+
+    if m15 is None or h1 is None or h4 is None:
+        print("[ERR] XAUUSD data insufficient")
+        return None, {"error": "data"}
+
+    real_m15 = len(m15_real) if m15_real is not None else 0
+    real_h1 = len(h1_real) if h1_real is not None else 0
+    real_h4 = len(h4_real) if h4_real is not None else 0
+    print(f"  XAUUSD M15: {len(m15):,} bars (real: {real_m15:,}) ({m15.index[0]} ~ {m15.index[-1]})")
+    print(f"  XAUUSD H1:  {len(h1):,} bars (real: {real_h1:,})")
+    print(f"  XAUUSD H4:  {len(h4):,} bars (real: {len(h4_real) if h4_real is not None else 0:,})")
+    if usdjpy is not None:
+        print(f"  USDJPY H1:  {len(usdjpy):,} bars")
 
     cfg = GoldConfig()
     bt = GoldBacktester(cfg)
@@ -121,36 +239,44 @@ def run_usdjpy_backtest():
     print(" USDJPY Backtest (MT5 Real Data)")
     print("=" * 60)
 
-    usdjpy_h1 = load_csv("USDJPY_H1.csv")
-    print(f"  USDJPY H1: {len(usdjpy_h1):,} bars ({usdjpy_h1.index[0]} ~ {usdjpy_h1.index[-1]})")
+    usdjpy_h1_real = load_csv("USDJPY_H1.csv")
+    usdjpy_h4_real = load_csv("USDJPY_H4.csv")
+    usdjpy_d1_real = load_csv("USDJPY_D1.csv")
+    usdjpy_m15_real = load_csv("USDJPY_M15.csv")
 
-    # Generate H4 from H1
-    h4_df = usdjpy_h1.resample("4h").agg({
-        "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
-    }).dropna()
+    # H4: 実データ + D1から補間
+    h4_df = usdjpy_h4_real
+    if usdjpy_d1_real is not None:
+        h4_gen = generate_h4_from_d1(usdjpy_d1_real)
+        h4_df = merge_and_fill(usdjpy_h4_real, h4_gen)
+    if h4_df is None and usdjpy_h1_real is not None:
+        h4_df = usdjpy_h1_real.resample("4h").agg({
+            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+        }).dropna()
 
-    # Generate M15 from H1
-    m15_list = []
-    for idx, row in usdjpy_h1.iterrows():
-        o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-        for j in range(4):
-            frac = j / 4
-            frac_next = (j + 1) / 4
-            seg_o = o + (c - o) * frac
-            seg_c = o + (c - o) * frac_next
-            seg_h = max(seg_o, seg_c) + (h - max(o, c)) * (1 - abs(frac - 0.5) * 2) * 0.5
-            seg_l = min(seg_o, seg_c) - (min(o, c) - l) * (1 - abs(frac - 0.5) * 2) * 0.5
-            ts = idx + timedelta(minutes=j * 15)
-            m15_list.append({"Open": seg_o, "High": seg_h, "Low": seg_l, "Close": seg_c, "time": ts})
+    # H1: 実データ + H4から補間
+    usdjpy_h1 = usdjpy_h1_real
+    if h4_df is not None:
+        h1_gen = generate_h1_from_h4(h4_df)
+        usdjpy_h1 = merge_and_fill(usdjpy_h1_real, h1_gen)
 
-    m15_df = pd.DataFrame(m15_list).set_index("time")
+    if usdjpy_h1 is None:
+        print("[ERR] USDJPY data insufficient")
+        return None, {"error": "data"}
 
-    print(f"  USDJPY H4:  {len(h4_df):,} bars (H1 -> resample)")
-    print(f"  USDJPY M15: {len(m15_df):,} bars (H1 -> interpolated)")
+    # M15: 実データ + H1から補間
+    m15_gen = generate_m15_from_h1(usdjpy_h1)
+    m15_df = merge_and_fill(usdjpy_m15_real, m15_gen)
+
+    real_h1 = len(usdjpy_h1_real) if usdjpy_h1_real is not None else 0
+    print(f"  USDJPY H1:  {len(usdjpy_h1):,} bars (real: {real_h1:,}) ({usdjpy_h1.index[0]} ~ {usdjpy_h1.index[-1]})")
+    print(f"  USDJPY H4:  {len(h4_df):,} bars")
+    print(f"  USDJPY M15: {len(m15_df):,} bars")
 
     cfg = USDJPYConfig()
     bt = USDJPYBacktester(cfg)
     bt.run(h4_df, usdjpy_h1, m15_df)
+    del usdjpy_h1, m15_df, h4_df  # free memory
     rpt = bt.get_report()
 
     if rpt and "error" not in rpt:
