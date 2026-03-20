@@ -61,6 +61,9 @@ class GoldConfig:
     H4_MA_SLOW = 50
     H4_ADX_PERIOD = 14
     H4_ADX_THRESHOLD = 20
+    H4_SLOPE_PERIOD = 20          # SMA(50) slope lookback (H4 bars, ~3.5 days)
+    TREND_SL_WIDEN = 1.3           # v5.2: SL widen multiplier for with-trend entries
+    TREND_SL_TIGHTEN = 0.7         # v5.2: SL tighten multiplier for counter-trend entries
 
     H1_MA_FAST = 10
     H1_MA_SLOW = 30
@@ -684,6 +687,9 @@ class GoldBacktester:
         h4_df["adx"], h4_df["plus_di"], h4_df["minus_di"] = calc_adx(
             h4_df["High"], h4_df["Low"], h4_df["Close"], cfg.H4_ADX_PERIOD)
 
+        # v5.2: H4 SMA(50) slope for macro trend
+        h4_df["ma_slow_slope"] = h4_df["ma_slow"] - h4_df["ma_slow"].shift(cfg.H4_SLOPE_PERIOD)
+
         # v3.0: H4 RSI
         h4_df["rsi"] = calc_rsi(h4_df["Close"], cfg.H4_RSI_PERIOD)
 
@@ -717,6 +723,7 @@ class GoldBacktester:
         print(f"   v3.0: Chandelier={cfg.USE_CHANDELIER_EXIT} EquityCurve={cfg.USE_EQUITY_CURVE} AdaptSize={cfg.USE_ADAPTIVE_SIZING}")
         print(f"   v4.0 Defense: News={cfg.USE_NEWS_FILTER} Weekend={cfg.USE_WEEKEND_CLOSE} CircuitBreaker={cfg.DAILY_MAX_LOSS_PCT}% CrashATR={cfg.CRASH_ATR_MULTI}x")
         print(f"   v4.0 Attack: MomentumBurst={cfg.USE_MOMENTUM_BURST} VolClimax={cfg.USE_VOLUME_CLIMAX} Pyramid={cfg.MAX_PYRAMID_POSITIONS} Reversal={cfg.USE_REVERSAL_MODE}")
+        print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
@@ -829,7 +836,7 @@ class GoldBacktester:
             sell_score = 0
             component_mask = [0] * 15  # v4.0: 15 components
 
-            # 1. H4 Trend (3 pts)
+            # 1. H4 Trend (3 pts) — original MA crossover + DI alignment
             if pd.notna(h4_row.get("adx")) and h4_row["adx"] >= cfg.H4_ADX_THRESHOLD:
                 if h4_row["ma_fast"] > h4_row["ma_slow"] and h4_row["plus_di"] > h4_row["minus_di"]:
                     buy_score += 3
@@ -837,6 +844,15 @@ class GoldBacktester:
                 elif h4_row["ma_fast"] < h4_row["ma_slow"] and h4_row["minus_di"] > h4_row["plus_di"]:
                     sell_score += 3
                     component_mask[0] = -1
+
+            # 1b. v5.2: Macro trend direction from MA50 slope
+            macro_trend_dir = 0  # +1=up, -1=down
+            if pd.notna(h4_row.get("ma_slow_slope")):
+                slope = h4_row["ma_slow_slope"]
+                if slope > 0:
+                    macro_trend_dir = 1
+                elif slope < 0:
+                    macro_trend_dir = -1
 
             # 2. H1 MA direction (2 pts)
             if pd.notna(h1_curr["ma_fast"]) and pd.notna(h1_curr["ma_slow"]):
@@ -1039,16 +1055,29 @@ class GoldBacktester:
                     pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
                     entry_type = "pyramid"
 
+                # v5.2: Trend-aligned SL adjustment
+                # With macro trend: wider SL (survive pullbacks)
+                # Against macro trend: tighter SL (cut losses faster)
+                adj_sl = dynamic_sl_points
+                adj_tp = adjusted_tp_points
+                if macro_trend_dir != 0:
+                    if (buy_score > sell_score and macro_trend_dir == 1) or \
+                       (sell_score > buy_score and macro_trend_dir == -1):
+                        adj_sl = min(dynamic_sl_points * cfg.TREND_SL_WIDEN, cfg.MAX_SL_POINTS)
+                    elif (buy_score > sell_score and macro_trend_dir == -1) or \
+                         (sell_score > buy_score and macro_trend_dir == 1):
+                        adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
+
                 if buy_score >= dynamic_min_score and buy_score > sell_score:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
-                                     dynamic_sl_points, adjusted_tp_points, current_atr,
+                                     adj_sl, adj_tp, current_atr,
                                      lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i)
                     entered = True
                 elif sell_score >= dynamic_min_score and sell_score > buy_score:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
-                                     dynamic_sl_points, adjusted_tp_points, current_atr,
+                                     adj_sl, adj_tp, current_atr,
                                      lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i)
