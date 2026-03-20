@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 class GoldConfig:
     SYMBOL = "GC=F"
     INITIAL_BALANCE = 300_000  # 30万円
-    RISK_PERCENT = 0.5         # v5.0: 0.3→0.5% リスク増加
+    RISK_PERCENT = 0.75        # v5.1: 0.5→0.75% バランス型
     MAX_POSITIONS = 3          # v4.0: changed from 1 for pyramiding
     MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/27
     COOLDOWN_BARS = 16         # SL後16本(=4時間)エントリー禁止
