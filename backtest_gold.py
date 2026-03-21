@@ -154,7 +154,7 @@ class GoldConfig:
     USE_VOLUME_CLIMAX = True
     MAX_PYRAMID_POSITIONS = 3
     PYRAMID_LOT_DECAY = 0.5
-    HIGH_VOL_PYRAMID_BLOCK = 1.5   # v8.1: block pyramids when vol_ratio > threshold
+    HIGH_VOL_PYRAMID_BLOCK = 1.2   # v8.2: lowered from 1.5 (proven: DD 15.1%→10.1%)
     USE_REVERSAL_MODE = True
 
     # v6.0 Professional
@@ -189,6 +189,18 @@ class GoldConfig:
     REGIME_ER_PERIOD = 20            # Efficiency ratio lookback on H4
     REGIME_ER_THRESHOLD = 0.3        # ER below this = choppy/ranging
     REGIME_SCORE_BOOST = 3           # Extra MIN_SCORE in ranging regime
+
+    # v8.2: Graduated SL expansion (tested, rejected: DD +4.5%)
+    GRADUATED_SL = False             # Disabled: wider SL increases loss per trade
+    GRADUATED_SL_START = 0.8
+    GRADUATED_SL_SCALE = 0.7
+    GRADUATED_SL_CAP = 0.5
+
+    # v8.2: Consecutive loss cooldown escalation (tested, rejected: PF 1.07)
+    CONSEC_LOSS_ESCALATION = False   # Disabled: halves trades, destroys performance
+    CONSEC_LOSS_THRESHOLD = 3
+    CONSEC_LOSS_COOLDOWN_MULTI = 2.0
+    CONSEC_LOSS_MAX_MULTI = 4.0
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -612,6 +624,7 @@ class GoldBacktester:
         self.open_positions = []
         self.peak_balance = cfg.INITIAL_BALANCE
         self.cooldown_until = 0
+        self.consecutive_sl_count = 0     # v8.2: track consecutive SL losses
         # v3.0 additions
         self.recent_trade_pnls = []
         self.component_stats = {i: {"wins": 0, "total": 0} for i in range(15)}  # v4.0: 15 components
@@ -880,10 +893,15 @@ class GoldBacktester:
 
             vol_ratio = current_atr / current_atr_avg
 
-            # High volatility regime: SL bonus
+            # v8.2: Graduated SL bonus (continuous scaling)
             sl_multi = cfg.SL_ATR_MULTI
-            if vol_ratio > cfg.VOL_REGIME_HIGH:
-                sl_multi += cfg.HIGH_VOL_SL_BONUS
+            if cfg.GRADUATED_SL:
+                sl_bonus = max(0, (vol_ratio - cfg.GRADUATED_SL_START)) * cfg.GRADUATED_SL_SCALE
+                sl_bonus = min(sl_bonus, cfg.GRADUATED_SL_CAP)
+                sl_multi += sl_bonus
+            else:
+                if vol_ratio > cfg.VOL_REGIME_HIGH:
+                    sl_multi += cfg.HIGH_VOL_SL_BONUS
 
             # v2.0: Dynamic SL/TP in points
             atr_points = current_atr / cfg.POINT
@@ -1511,9 +1529,17 @@ class GoldBacktester:
         cfg = self.cfg
         pt = cfg.POINT
 
-        # Cooldown after SL
+        # Cooldown after SL (v8.2: escalating cooldown on consecutive losses)
         if reason == "SL" and bar_idx > 0:
-            self.cooldown_until = bar_idx + cfg.COOLDOWN_BARS
+            self.consecutive_sl_count += 1
+            cooldown_bars = cfg.COOLDOWN_BARS
+            if cfg.CONSEC_LOSS_ESCALATION and self.consecutive_sl_count >= cfg.CONSEC_LOSS_THRESHOLD:
+                escalation = cfg.CONSEC_LOSS_COOLDOWN_MULTI ** (
+                    self.consecutive_sl_count - cfg.CONSEC_LOSS_THRESHOLD + 1)
+                cooldown_bars = int(cfg.COOLDOWN_BARS * min(escalation, cfg.CONSEC_LOSS_MAX_MULTI))
+            self.cooldown_until = bar_idx + cooldown_bars
+        elif reason in ("TP", "Partial", "Trail"):
+            self.consecutive_sl_count = 0
 
         # v6.0: Exit slippage (against you)
         slippage = cfg.SLIPPAGE_POINTS * pt

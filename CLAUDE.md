@@ -47,7 +47,27 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v8.1 (current) - High-Volatility Pyramid Block
+### v8.2 (current) - Tighter Pyramid Volatility Gate
+- **ピラミッドブロック閾値引き下げ**: vol_ratio > 1.2 でピラミッドをブロック（v8.1は1.5）
+- vol_ratio 1.2-1.5の「デッドゾーン」でもピラミッドを制限し、高ボラ時の追加ポジション損失を抑制
+- Config: `HIGH_VOL_PYRAMID_BLOCK=1.2`
+- **検証・不採用**: Graduated SL (DD +4.5% 悪化), Consecutive Loss Cooldown (PF 1.07 壊滅)
+- **2024-2026バックテスト結果 (v8.1 → v8.2)**:
+
+| Metric | v8.1 | v8.2 | Delta |
+|--------|------|------|-------|
+| PF | 1.39 | 1.34 | -0.05 |
+| WinRate | 54.7% | 54.1% | -0.6% |
+| MaxDD | 11.0% | **10.9%** | -0.1% |
+| Return | +187.3% | +149.6% | -37.7% |
+| Trades | 1383 | 1256 | -127 |
+| Pyramids | 728 | 588 | -140 |
+| Jan2026 PnL | -27,305 | **-14,878** | +12,427 |
+
+- **DD微改善、Jan2026損失ほぼ半減**: 高ボラ期のピラミッド140件を追加ブロック
+- **リターン減少**: ピラミッド制限によりアグレッシブなポジション拡大を抑制。DDリスク低減とのトレードオフ
+
+### v8.1 - High-Volatility Pyramid Block
 - **高ボラ時ピラミッド制限**: vol_ratio > 1.5 の時にピラミッドエントリーをブロック
 - ボラティリティが平均の1.5倍を超える局面では追加ポジションのリスクが大きいため抑制
 - Config: `HIGH_VOL_PYRAMID_BLOCK=1.5`
@@ -141,6 +161,9 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
+- **v8.2: ピラミッドブロック閾値1.2**: vol_ratio 1.2-1.5の「デッドゾーン」でもピラミッドを制限。Jan2026損失-27K→-15K（ほぼ半減）
+- **v8.2不採用: Graduated SL**: SLを段階的に広げるとDD +4.5%悪化。SLが広い=損切り時の損失額が大きい
+- **v8.2不採用: Consecutive Loss Cooldown**: 3連続SL後のクールダウン延長でPF 1.07に壊滅。トレード数半減で利益機会を逃す
 - **v8.1: 高ボラピラミッド制限**: vol_ratio > 1.5（ATRが平均の1.5倍超）の局面ではピラミッドをブロック。高ボラ時の追加ポジションは損失が拡大しやすく、25件ブロックだけでリターン+25.7%改善
 - **v8.0: ERレジーム検出**: Efficiency Ratio（方向効率比）でトレンド/レンジを判定。ADXやBBWidthよりも優れた結果。レンジ相場ではMIN_SCOREを+3して低品質トレードをフィルタ
 - **v8.0: Mean-Reversion不採用**: RSI極値・BB反転の逆張り層を検証したが、ER regime detectionより効果が小さく複雑性が増すため不採用
