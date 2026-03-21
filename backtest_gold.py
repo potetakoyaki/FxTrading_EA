@@ -186,26 +186,25 @@ class GoldConfig:
     # v8.0: Mean-Reversion Layer (range-market enhancement)
     USE_MEAN_REVERSION = True
     # Regime detection: ADX threshold for "ranging" classification
-    MR_ADX_THRESHOLD = 25           # H4 ADX below this = ranging regime
-    MR_ATR_RATIO_MAX = 1.2          # ATR ratio below this = low-volatility (range)
-    # RSI extremes reversal
-    MR_RSI_OVERBOUGHT = 75          # H1 RSI above this -> SELL bonus
-    MR_RSI_OVERSOLD = 25            # H1 RSI below this -> BUY bonus
-    MR_RSI_POINTS = 2               # Points for RSI extreme signal
+    MR_ADX_THRESHOLD = 30           # H4 ADX below this = ranging regime
+    MR_ATR_RATIO_MAX = 1.3          # ATR ratio below this = low-volatility (range)
+    # RSI extremes reversal (two tiers)
+    MR_RSI_OVERBOUGHT = 75          # H1 RSI above this -> strong SELL bonus
+    MR_RSI_OVERSOLD = 25            # H1 RSI below this -> strong BUY bonus
+    MR_RSI_OB_MILD = 70             # Mild overbought threshold
+    MR_RSI_OS_MILD = 30             # Mild oversold threshold
+    MR_RSI_POINTS = 2               # Points for extreme RSI signal
+    MR_RSI_MILD_POINTS = 1          # Points for mild RSI signal
     # Bollinger Band reversal
     MR_BB_POINTS = 2                # Points for BB touch reversal
     # Combined reversal (RSI extreme + BB touch + S/R)
-    MR_COMBO_BONUS = 2              # Extra bonus for multi-signal confirmation
-    # Regime blending weights
-    MR_RANGE_TREND_WEIGHT = 0.5     # Trend score weight in range regime
-    MR_RANGE_REVERSION_WEIGHT = 1.0 # Reversion score weight in range regime
-    MR_TREND_REVERSION_WEIGHT = 0.0 # Reversion score weight in trending regime
+    MR_COMBO_BONUS = 1              # Extra bonus for multi-signal confirmation
     # SL/TP for mean-reversion trades
     MR_SL_ATR_MULTI = 1.2           # Tighter SL for reversion trades
     MR_TP_ATR_MULTI = 2.0           # Tighter TP (quicker exits in range)
     MR_LOT_SCALE = 0.7              # Smaller lots for reversion trades
     # Mean-reversion minimum score
-    MR_MIN_SCORE = 4                # Lower threshold for reversion entries
+    MR_MIN_SCORE = 2                # Low threshold - RSI extreme alone qualifies
 
 
 # ============================================================
@@ -503,14 +502,20 @@ def get_mean_reversion_score(h1_curr, h1_prev, current_price, current_atr, sr_si
     if pd.isna(rsi_val):
         return 0, 0
 
-    # 1. RSI extreme reversal
+    # 1. RSI extreme reversal (two tiers)
     rsi_buy = False
     rsi_sell = False
     if rsi_val <= cfg.MR_RSI_OVERSOLD:
         mr_buy += cfg.MR_RSI_POINTS
         rsi_buy = True
+    elif rsi_val <= cfg.MR_RSI_OS_MILD:
+        mr_buy += cfg.MR_RSI_MILD_POINTS
+        rsi_buy = True
     elif rsi_val >= cfg.MR_RSI_OVERBOUGHT:
         mr_sell += cfg.MR_RSI_POINTS
+        rsi_sell = True
+    elif rsi_val >= cfg.MR_RSI_OB_MILD:
+        mr_sell += cfg.MR_RSI_MILD_POINTS
         rsi_sell = True
 
     # 2. Bollinger Band reversal
