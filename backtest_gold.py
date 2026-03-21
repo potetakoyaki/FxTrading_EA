@@ -854,6 +854,8 @@ class GoldBacktester:
         print(f"   v4.0 Defense: News={cfg.USE_NEWS_FILTER} Weekend={cfg.USE_WEEKEND_CLOSE} CircuitBreaker={cfg.DAILY_MAX_LOSS_PCT}% CrashATR={cfg.CRASH_ATR_MULTI}x")
         print(f"   v4.0 Attack: MomentumBurst={cfg.USE_MOMENTUM_BURST} VolClimax={cfg.USE_VOLUME_CLIMAX} Pyramid={cfg.MAX_PYRAMID_POSITIONS} Reversal={cfg.USE_REVERSAL_MODE}")
         print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
+        if cfg.USE_MEAN_REVERSION:
+            print(f"   v8.0: MeanReversion ADX<{cfg.MR_ADX_THRESHOLD} ATR<{cfg.MR_ATR_RATIO_MAX} RSI={cfg.MR_RSI_OVERSOLD}/{cfg.MR_RSI_OVERBOUGHT} MinScore={cfg.MR_MIN_SCORE}")
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
@@ -1241,6 +1243,33 @@ class GoldBacktester:
                                      lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
+                    entered = True
+
+            # v8.0: Mean-reversion entry - only in range regime, when no trend entry
+            if not entered and cfg.USE_MEAN_REVERSION and is_range_regime and pos_count == 0:
+                # Use tighter SL/TP for mean-reversion trades
+                mr_sl = atr_points * cfg.MR_SL_ATR_MULTI
+                mr_sl = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, mr_sl))
+                mr_tp = atr_points * cfg.MR_TP_ATR_MULTI
+                bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
+
+                mr_min = cfg.MR_MIN_SCORE
+                if current_dd >= 15.0:
+                    mr_min += 2
+                elif current_dd >= 10.0:
+                    mr_min += 1
+
+                if mr_buy_score >= mr_min and mr_buy_score > mr_sell_score:
+                    self._open_trade("BUY", cc, ct, mr_buy_score, current_dd,
+                                     mr_sl, mr_tp, current_atr,
+                                     lot_multiplier * cfg.MR_LOT_SCALE, component_mask,
+                                     entry_type="meanrev", entry_bar=i, bar_spread=bar_spread)
+                    entered = True
+                elif mr_sell_score >= mr_min and mr_sell_score > mr_buy_score:
+                    self._open_trade("SELL", cc, ct, mr_sell_score, current_dd,
+                                     mr_sl, mr_tp, current_atr,
+                                     lot_multiplier * cfg.MR_LOT_SCALE, component_mask,
+                                     entry_type="meanrev", entry_bar=i, bar_spread=bar_spread)
                     entered = True
 
             # v4.0: Reversal mode - only when no normal entry and no open positions
