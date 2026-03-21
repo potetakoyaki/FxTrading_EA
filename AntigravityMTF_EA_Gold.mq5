@@ -137,6 +137,12 @@ input double Trend_SL_Tighten   = 0.7;     // 逆トレンドSL倍率
 input double Trend_TP_Extend    = 1.2;     // 順トレンドTP倍率
 input double Trend_TP_Tighten   = 0.8;     // 逆トレンドTP倍率
 
+input group "=== v8.0 ERレジーム検出 ==="
+input string RegimeMethod       = "er";    // Regime detection method
+input int    RegimeERPeriod     = 20;      // ER lookback period on H4
+input double RegimeERThreshold  = 0.3;     // ER below this = ranging
+input int    RegimeScoreBoost   = 3;       // Extra minScore in ranging
+
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
 //+------------------------------------------------------------------+
@@ -520,6 +526,24 @@ void OnTick()
       }
    }
    double h4Slope = h4Sma50_now - h4Sma50_prev;
+
+   // v8.0: Efficiency Ratio on H4
+   double h4_er = 0;
+   if(RegimeMethod == "er")
+   {
+      double h4CloseArr[];
+      ArraySetAsSeries(h4CloseArr, true);
+      if(CopyClose(_Symbol, PERIOD_H4, 0, RegimeERPeriod + 1, h4CloseArr) >= RegimeERPeriod + 1)
+      {
+         double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[RegimeERPeriod]);
+         double sumAbsChanges = 0;
+         for(int k = 0; k < RegimeERPeriod; k++)
+            sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+         if(sumAbsChanges > 0)
+            h4_er = netChange / sumAbsChanges;
+      }
+   }
+
    bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
    bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
    bool isWithTrend = isBuyWithTrend || isSellWithTrend;
@@ -582,6 +606,10 @@ void OnTick()
    else if(currentDD >= 10.0) currentMinScore = 12;
    // v4.0: Ranging regime → +3
    if(advRegime == 1) currentMinScore += 3;
+
+   // v8.0: ER regime filter
+   if(RegimeMethod == "er" && h4_er < RegimeERThreshold)
+      currentMinScore += RegimeScoreBoost;
 
    bool entered = false;
 
