@@ -22,9 +22,9 @@ v7.0: Symmetric Trend-Following (Bull/Bear balanced)
       - Trend-aligned TP adjustment: extend TP with-trend, tighten counter-trend
       - BUY/SELL directional breakdown in report
 v7.1: Trend Quality Filter (weak trend protection)
-      - Weak trend detection: ADX < 25 OR slope/ATR < 0.5
-      - Weak trend: MIN_SCORE +3, TP x0.7, cooldown x2
-      - Prevents overtrading in choppy/directionless markets (2023 fix)
+      - Weak trend detection: ADX < 25 OR slope/ATR < 0.3
+      - Weak trend: MIN_SCORE +1, lot x0.5, cooldown x1.5
+      - Reduces exposure in choppy markets without killing trade signals
 """
 
 import pandas as pd
@@ -158,13 +158,12 @@ class GoldConfig:
     PYRAMID_LOT_DECAY = 0.5
     USE_REVERSAL_MODE = True
 
-    # v7.1: Trend quality filter (weak trend = adaptive SL/TP)
+    # v7.1: Trend quality filter (weak trend = reduced exposure)
     USE_TREND_QUALITY_FILTER = True
     WEAK_TREND_ADX = 25              # ADX below this = weak trend
     WEAK_TREND_SLOPE_ATR = 0.3       # abs(slope)/ATR below this = no clear direction
-    WEAK_TREND_SCORE_BOOST = 1       # Mild MIN_SCORE boost (don't kill trades)
-    WEAK_TREND_TP_REDUCE = 0.55      # Aggressive TP reduction (take profit much faster)
-    WEAK_TREND_SL_REDUCE = 0.85      # Tighter SL in weak trend (cut losses faster)
+    WEAK_TREND_SCORE_BOOST = 1       # Mild MIN_SCORE boost
+    WEAK_TREND_LOT_REDUCE = 0.5     # Halve position size in weak trends
     WEAK_TREND_COOLDOWN_MULTI = 1.5  # Mild cooldown extension after SL
 
     # v6.0 Professional
@@ -1100,9 +1099,10 @@ class GoldBacktester:
             tp_multi = 1.5 if abs(burst) == 3 else 1.0
             adjusted_tp_points = dynamic_tp_points * tp_multi
 
-            # v7.1: Weak trend TP reduction (take profits faster in choppy markets)
-            if weak_trend and abs(burst) != 3:
-                adjusted_tp_points *= cfg.WEAK_TREND_TP_REDUCE
+            # v7.1: Weak trend lot reduction (reduce exposure in choppy markets)
+            weak_trend_lot_multi = 1.0
+            if weak_trend:
+                weak_trend_lot_multi = cfg.WEAK_TREND_LOT_REDUCE
 
             # ---- v4.0: Pyramiding support ----
             pos_count = len(self.open_positions)
@@ -1148,11 +1148,6 @@ class GoldBacktester:
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
                         adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
 
-                # v7.1: Weak trend SL/TP adaptation (tighter targets in choppy markets)
-                if weak_trend:
-                    adj_tp *= cfg.WEAK_TREND_TP_REDUCE
-                    adj_sl = max(adj_sl * cfg.WEAK_TREND_SL_REDUCE, cfg.MIN_SL_POINTS)
-
                 # v6.0: Score margin filter - require clear directional bias
                 score_margin = cfg.SCORE_MARGIN_MIN
                 # v6.0: Get actual spread from CSV data
@@ -1161,14 +1156,14 @@ class GoldBacktester:
                 if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi * weak_trend_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
                 elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi * weak_trend_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
