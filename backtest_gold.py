@@ -247,7 +247,7 @@ class GoldConfig:
     USE_V10_ENGINE = True
 
     # 1. Regime Transition Smoothing (blend parameters on regime change)
-    REGIME_BLEND_ALPHA = 0.3         # Blending speed: 0=instant, 1=never change
+    REGIME_BLEND_ALPHA = 0.3         # Blending speed: 0=never change, 1=instant switch
     USE_REGIME_BLENDING = False       # v10.0a: disabled (averaging destroys edge)
 
     # 2. Dynamic Component Effectiveness Tracking
@@ -1061,14 +1061,14 @@ class GoldBacktester:
         return 1.0
 
     def get_session(self, hour):
-        """v10.0: Get current trading session."""
+        """v10.0: Get current trading session. London=8-13, NY=13-22 (overlap is NY)."""
         cfg = self.cfg
         if cfg.SESSION_ASIAN_START <= hour < cfg.SESSION_ASIAN_END:
             return 'asian'
         elif cfg.SESSION_LONDON_START <= hour < cfg.SESSION_NY_START:
-            return 'london'
+            return 'london'  # 8-13 UTC (pure London, no overlap)
         else:
-            return 'ny'
+            return 'ny'  # 13-22 UTC (includes London/NY overlap)
 
     def get_session_lot_modifier(self, session, regime):
         """v10.0: Get session-specific lot modifier for current regime."""
@@ -1770,7 +1770,7 @@ class GoldBacktester:
                     bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
                     self._open_trade(mr_dir, cc, ct, mr_score, current_dd,
                                      mr_sl, mr_tp, current_atr,
-                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE,
+                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE * session_lot_mod,
                                      component_mask,
                                      entry_type="mean_reversion",
                                      entry_bar=i, bar_spread=bar_spread)
@@ -1785,12 +1785,12 @@ class GoldBacktester:
                 if reversal == 1:
                     self._open_trade("BUY", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
                 elif reversal == -1:
                     self._open_trade("SELL", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
@@ -2178,12 +2178,20 @@ class GoldBacktester:
                     # v10.0: Track component effectiveness (direction-match, pnl)
                     if self.cfg.USE_V10_ENGINE and self.cfg.USE_COMPONENT_EFFECTIVENESS:
                         self.component_trades[comp_idx].append((val, pnl_jpy))
+                        # Trim to 2x lookback to avoid unbounded growth
+                        max_len = self.cfg.COMP_EFF_LOOKBACK * 2
+                        if len(self.component_trades[comp_idx]) > max_len:
+                            self.component_trades[comp_idx] = self.component_trades[comp_idx][-self.cfg.COMP_EFF_LOOKBACK:]
 
         # v10.0: Track per-regime PnL for regime performance memory
         if self.cfg.USE_V10_ENGINE and self.cfg.USE_REGIME_MEMORY:
             pos_regime = pos.get("regime", "trend")
             if pos_regime in self.regime_trade_pnls:
                 self.regime_trade_pnls[pos_regime].append(pnl_jpy)
+                # Trim to 2x lookback
+                max_len = self.cfg.REGIME_MEMORY_LOOKBACK * 2
+                if len(self.regime_trade_pnls[pos_regime]) > max_len:
+                    self.regime_trade_pnls[pos_regime] = self.regime_trade_pnls[pos_regime][-self.cfg.REGIME_MEMORY_LOOKBACK:]
 
         self.trades.append({
             "open_time": pos["open_time"],
