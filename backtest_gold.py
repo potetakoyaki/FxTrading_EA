@@ -234,7 +234,7 @@ class GoldConfig:
     # Component bonuses: BB Bounce(+1), S/R(+1), RSI Divergence(+1), Channel(+1)
     RANGE_COMPONENT_BONUS = {3: 1, 10: 1, 9: 1, 5: 1}
     # Mean-reversion specific
-    RANGE_MR_ENABLED = True
+    RANGE_MR_ENABLED = False          # v9.0c: disabled (PF<1.0 in 2/3 periods)
     RANGE_MR_RSI_OB = 75             # RSI overbought for MR sell
     RANGE_MR_RSI_OS = 25             # RSI oversold for MR buy
     RANGE_MR_RSI_OB_MILD = 70
@@ -249,8 +249,8 @@ class GoldConfig:
     HIGHVOL_MIN_SCORE = 13
     HIGHVOL_SL_ATR_MULTI = 2.0      # v9.0b: reduced from 2.5 (wide SL = big losses)
     HIGHVOL_TP_ATR_MULTI = 3.5
-    HIGHVOL_LOT_SCALE = 0.3          # v9.0b: reduced from 0.4 (further limit risk)
-    HIGHVOL_ALLOW_PYRAMID = False
+    HIGHVOL_LOT_SCALE = 0.3          # v9.0b: conservative lots
+    HIGHVOL_ALLOW_PYRAMID = False    # v9.0d: reverted (pyramid in high-vol causes DD blowup)
     HIGHVOL_SCORE_MARGIN = 3
     HIGHVOL_COOLDOWN_BARS = 24       # Longest cooldown
     HIGHVOL_SL_WIDEN = 1.0           # No trend alignment
@@ -778,7 +778,7 @@ class GoldBacktester:
     def detect_regime_v9(self, h4_er, vol_ratio):
         """
         2D regime classification: ER (trend quality) x Volatility (ATR ratio).
-        Returns: 'crash', 'high_vol', 'range', 'trend'
+        Returns: 'crash', 'high_vol', 'trend', 'range'
         """
         cfg = self.cfg
         if vol_ratio >= cfg.REGIME_VOL_CRASH:
@@ -1138,6 +1138,9 @@ class GoldBacktester:
                 profile = self.get_regime_profile(current_regime)
                 sl_multi = profile['sl_multi']
                 tp_multi = profile['tp_multi']
+                # v9.0: In trend regime with elevated vol, widen SL slightly
+                if current_regime == 'trend' and vol_ratio >= 1.2:
+                    sl_multi += 0.3  # Modest SL bonus for elevated vol in trend
             else:
                 current_regime = 'trend'  # Default behavior
                 profile = None
