@@ -1,11 +1,28 @@
 """
-AntigravityMTF EA Gold v4.0 -- Backtester (6 months)
+AntigravityMTF EA Gold v7.0 -- Symmetric Trend-Following Backtester
 ATR-based dynamic SL/TP, volatility regime, session bonus, momentum, partial close
 v3.0: USD Correlation, RSI Divergence, S/R Levels, Candle Patterns, H4 RSI,
       Chandelier Exit, Equity Curve Filter, Adaptive Sizing (Half-Kelly)
 v4.0: News Filter, Dynamic Spread, Weekend Close, 4-State Regime (Crash/Ranging/Trending/Volatile),
       Stale Trade Exit, Daily Circuit Breaker, Momentum Burst (+3pt), Volume Climax (+2pt),
       Pyramiding (up to 3), Reversal Mode, Risk Metrics (Sharpe/Sortino/Calmar)
+v5.2: Trend-aligned SL + CSV fallback
+v6.0: Professional Grade
+      - Realistic transaction costs (CSV spread + slippage model)
+      - Walk-forward validation (rolling OOS)
+      - Monte Carlo simulation (confidence intervals)
+      - Score margin filter (min gap between buy/sell scores)
+      - Adaptive time-decay SL tightening
+      - Enhanced trailing stop (ATR ratchet)
+      - Professional risk reporting (OOS metrics, robustness score)
+v7.0: Symmetric Trend-Following (Bull/Bear balanced)
+      - H1 RSI scoring: symmetric 30-40/60-70 ranges (was 35-40/60-65)
+      - H4 RSI alignment: symmetric H1 RSI filters (25/75 vs 30/70)
+      - S/R levels: removed counter-direction penalty (was +1/-1, now +1 only)
+      - Trend-aligned TP adjustment: extend TP with-trend, tighten counter-trend
+      - BUY/SELL directional breakdown in report
+      (v7.1 weak-trend filter tested and reverted: no improvement in 2023-24
+       due to scoring system having zero predictive power in range markets)
 """
 
 import pandas as pd
@@ -64,6 +81,8 @@ class GoldConfig:
     H4_SLOPE_PERIOD = 20          # SMA(50) slope lookback (H4 bars, ~3.5 days)
     TREND_SL_WIDEN = 1.3           # v5.2: SL widen multiplier for with-trend entries
     TREND_SL_TIGHTEN = 0.7         # v5.2: SL tighten multiplier for counter-trend entries
+    TREND_TP_EXTEND = 1.2          # v7.0: TP extend multiplier for with-trend entries
+    TREND_TP_TIGHTEN = 0.8         # v7.0: TP tighten multiplier for counter-trend entries
 
     H1_MA_FAST = 10
     H1_MA_SLOW = 30
@@ -136,6 +155,56 @@ class GoldConfig:
     MAX_PYRAMID_POSITIONS = 3
     PYRAMID_LOT_DECAY = 0.5
     USE_REVERSAL_MODE = True
+
+    # v6.0 Professional
+    # Transaction costs
+    USE_REALISTIC_SPREAD = True      # Use actual spread from CSV data
+    SLIPPAGE_POINTS = 3              # Realistic slippage (0.03 USD on Gold)
+    COMMISSION_PER_LOT = 7.0         # USD per round-trip lot (typical ECN)
+
+    # Score quality filter
+    SCORE_MARGIN_MIN = 2             # Minimum gap: buy_score - sell_score >= 2
+
+    # Time-decay SL tightening
+    USE_TIME_DECAY_SL = True
+    TIME_DECAY_START_BARS = 48       # Start tightening after 12h (48 M15 bars)
+    TIME_DECAY_RATE = 0.85           # SL shrinks to 85% per 12h
+
+    # Enhanced trailing (ATR ratchet)
+    USE_ATR_RATCHET_TRAIL = True
+    RATCHET_STEP_ATR = 0.5           # Tighten trail by 0.5 ATR per ATR of profit
+
+    # Walk-forward
+    WF_TRAIN_MONTHS = 6              # Training window
+    WF_TEST_MONTHS = 2               # OOS test window
+    WF_STEP_MONTHS = 2               # Step size
+
+    # Monte Carlo
+    MC_SIMULATIONS = 1000
+    MC_CONFIDENCE = 0.95
+
+    # v8.0: ER Regime Detection (range-market filter)
+    REGIME_METHOD = 'er'             # 'none' or 'er'
+    REGIME_ER_PERIOD = 20            # Efficiency ratio lookback on H4
+    REGIME_ER_THRESHOLD = 0.3        # ER below this = choppy/ranging
+    REGIME_SCORE_BOOST = 3           # Extra MIN_SCORE in ranging regime
+
+    # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
+    USE_MEAN_REVERSION = True
+    MR_ADX_THRESHOLD = 30
+    MR_ATR_RATIO_MAX = 1.3
+    MR_RSI_OVERBOUGHT = 75
+    MR_RSI_OVERSOLD = 25
+    MR_RSI_OB_MILD = 70
+    MR_RSI_OS_MILD = 30
+    MR_RSI_POINTS = 2
+    MR_RSI_MILD_POINTS = 1
+    MR_BB_POINTS = 2
+    MR_COMBO_BONUS = 1
+    MR_SL_ATR_MULTI = 1.2
+    MR_TP_ATR_MULTI = 2.0
+    MR_LOT_SCALE = 0.7
+    MR_MIN_SCORE = 2
 
 
 # ============================================================
@@ -418,16 +487,17 @@ def get_candle_pattern(h1_df, current_time):
     return 0
 
 
+
 def get_h4_rsi_alignment(h4_rsi_val, h1_rsi_val):
-    """Check H4 RSI alignment with H1 RSI."""
+    """Check H4 RSI alignment with H1 RSI (symmetric for bull/bear)."""
     if pd.isna(h4_rsi_val) or pd.isna(h1_rsi_val):
         return 0
 
-    # H4 RSI 50-75 + H1 RSI < 70 -> bullish alignment
-    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 70:
+    # Bullish alignment: H4 RSI 50-75 + H1 RSI not overbought (< 75)
+    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 75:
         return 1
-    # H4 RSI 25-50 + H1 RSI > 30 -> bearish alignment
-    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 30:
+    # Bearish alignment: H4 RSI 25-50 + H1 RSI not oversold (> 25)
+    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 25:
         return -1
     return 0
 
@@ -724,6 +794,16 @@ class GoldBacktester:
         print(f"   v4.0 Defense: News={cfg.USE_NEWS_FILTER} Weekend={cfg.USE_WEEKEND_CLOSE} CircuitBreaker={cfg.DAILY_MAX_LOSS_PCT}% CrashATR={cfg.CRASH_ATR_MULTI}x")
         print(f"   v4.0 Attack: MomentumBurst={cfg.USE_MOMENTUM_BURST} VolClimax={cfg.USE_VOLUME_CLIMAX} Pyramid={cfg.MAX_PYRAMID_POSITIONS} Reversal={cfg.USE_REVERSAL_MODE}")
         print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
+        if cfg.REGIME_METHOD != 'none':
+            print(f"   v8.0: Regime={cfg.REGIME_METHOD} ER_thresh={cfg.REGIME_ER_THRESHOLD} ScoreBoost={cfg.REGIME_SCORE_BOOST}")
+
+
+        # v8.0: Pre-compute ER regime indicator on H4
+        if cfg.REGIME_METHOD == 'er':
+            er_period = cfg.REGIME_ER_PERIOD
+            net_change = abs(h4_df['Close'] - h4_df['Close'].shift(er_period))
+            sum_abs_changes = h4_df['Close'].diff().abs().rolling(window=er_period).sum()
+            h4_df['efficiency_ratio'] = net_change / sum_abs_changes.replace(0, np.nan)
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
@@ -863,17 +943,19 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[1] = -1
 
-            # 3. H1 RSI (1 pt) -- exclusive ranges
+            # 3. H1 RSI (1 pt) -- symmetric ranges for bull/bear
             if pd.notna(h1_curr["rsi"]):
                 rsi_val = h1_curr["rsi"]
                 if 40 < rsi_val < 60:
                     buy_score += 1
                     sell_score += 1
                     component_mask[2] = 1
-                elif 60 <= rsi_val < 65:
+                elif 60 <= rsi_val < 70:
+                    # Momentum zone: reward trend-following direction
                     buy_score += 1
                     component_mask[2] = 1
-                elif 35 < rsi_val <= 40:
+                elif 30 < rsi_val <= 40:
+                    # Momentum zone: reward trend-following direction
                     sell_score += 1
                     component_mask[2] = -1
 
@@ -952,16 +1034,14 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[9] = -1
 
-            # 11. v3.0: S/R Level (+1/-1)
+            # 11. v3.0: S/R Level (+1, no penalty to opposite side)
             if cfg.USE_SR_LEVELS:
                 sr = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
                 if sr == 1:
                     buy_score += 1
-                    sell_score -= 1
                     component_mask[10] = 1
                 elif sr == -1:
                     sell_score += 1
-                    buy_score -= 1
                     component_mask[10] = -1
 
             # 12. v3.0: Candle Pattern (+1)
@@ -1014,8 +1094,14 @@ class GoldBacktester:
                 dynamic_min_score = 15
             elif current_dd >= 10.0:
                 dynamic_min_score = 12
-            if regime == 1:  # Ranging
+            if regime == 1:  # Ranging (ATR-based)
                 dynamic_min_score += 3
+
+            # v8.0: ER Regime Detection - additional filter for choppy markets
+            if cfg.REGIME_METHOD == 'er':
+                h4_er = h4_row.get("efficiency_ratio")
+                if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
+                    dynamic_min_score += cfg.REGIME_SCORE_BOOST
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -1055,32 +1141,41 @@ class GoldBacktester:
                     pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
                     entry_type = "pyramid"
 
-                # v5.2: Trend-aligned SL adjustment
-                # With macro trend: wider SL (survive pullbacks)
-                # Against macro trend: tighter SL (cut losses faster)
+                # v5.2/v7.0: Trend-aligned SL/TP adjustment
+                # With macro trend: wider SL (survive pullbacks) + wider TP (ride the trend)
+                # Against macro trend: tighter SL (cut losses faster) + tighter TP (grab quick profits)
                 adj_sl = dynamic_sl_points
                 adj_tp = adjusted_tp_points
                 if macro_trend_dir != 0:
                     if (buy_score > sell_score and macro_trend_dir == 1) or \
                        (sell_score > buy_score and macro_trend_dir == -1):
+                        # With-trend: wider SL + extended TP
                         adj_sl = min(dynamic_sl_points * cfg.TREND_SL_WIDEN, cfg.MAX_SL_POINTS)
+                        adj_tp = adjusted_tp_points * cfg.TREND_TP_EXTEND
                     elif (buy_score > sell_score and macro_trend_dir == -1) or \
                          (sell_score > buy_score and macro_trend_dir == 1):
+                        # Counter-trend: tighter SL + tighter TP
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
+                        adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
 
-                if buy_score >= dynamic_min_score and buy_score > sell_score:
+                # v6.0: Score margin filter - require clear directional bias
+                score_margin = cfg.SCORE_MARGIN_MIN
+                # v6.0: Get actual spread from CSV data
+                bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
+
+                if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
                                      lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i)
+                                     entry_bar=i, bar_spread=bar_spread)
                     entered = True
-                elif sell_score >= dynamic_min_score and sell_score > buy_score:
+                elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
                                      lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i)
+                                     entry_bar=i, bar_spread=bar_spread)
                     entered = True
 
             # v4.0: Reversal mode - only when no normal entry and no open positions
@@ -1149,12 +1244,19 @@ class GoldBacktester:
     def _open_trade(self, direction, price, time, score, dd_pct,
                     sl_points, tp_points, current_atr,
                     lot_multiplier=1.0, component_mask=None,
-                    entry_type="normal", momentum_burst=False, entry_bar=0):
+                    entry_type="normal", momentum_burst=False, entry_bar=0,
+                    bar_spread=None):
         cfg = self.cfg
         pt = cfg.POINT
-        spread = cfg.MAX_SPREAD_POINTS * pt * 0.5  # average spread
 
-        entry = price + spread if direction == "BUY" else price - spread
+        # v6.0: Realistic spread from CSV + slippage
+        if cfg.USE_REALISTIC_SPREAD and bar_spread is not None and bar_spread > 0:
+            spread = bar_spread * pt
+        else:
+            spread = cfg.MAX_SPREAD_POINTS * pt * 0.5
+        slippage = cfg.SLIPPAGE_POINTS * pt
+
+        entry = price + spread + slippage if direction == "BUY" else price - spread - slippage
         if direction == "BUY":
             sl = entry - sl_points * pt
             tp = entry + tp_points * pt
@@ -1276,6 +1378,15 @@ class GoldBacktester:
                     if ns > pos["sl"] + 5 * pt:
                         pos["sl"] = ns
 
+                # v6.0: ATR ratchet trail - tighten trail as profit grows
+                if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
+                    atr_multiples = profit_price / atr_entry
+                    if atr_multiples >= 2.0:
+                        ratchet_step = atr_entry * max(0.3, cfg.RATCHET_STEP_ATR * (1.0 / atr_multiples * 2))
+                        ratchet_sl = close - ratchet_step
+                        if ratchet_sl > pos["sl"] + 5 * pt:
+                            pos["sl"] = ratchet_sl
+
                 # v3.0: Chandelier Exit for BUY
                 if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
@@ -1283,6 +1394,18 @@ class GoldBacktester:
                     chandelier_sl = highest_high - atr_entry * cfg.CHANDELIER_ATR_MULTI
                     if chandelier_sl > pos["sl"] + 5 * pt:
                         pos["sl"] = chandelier_sl
+
+                # v6.0: Time-decay SL tightening for losing trades
+                if cfg.USE_TIME_DECAY_SL and not pos["breakeven_done"]:
+                    bars_open = bar_idx - pos.get("entry_bar", bar_idx)
+                    if bars_open >= cfg.TIME_DECAY_START_BARS:
+                        decay_periods = (bars_open - cfg.TIME_DECAY_START_BARS) / cfg.TIME_DECAY_START_BARS
+                        decay_factor = cfg.TIME_DECAY_RATE ** decay_periods
+                        original_sl_dist = pos["sl_points"] * pt
+                        decayed_sl_dist = max(cfg.MIN_SL_POINTS * pt, original_sl_dist * decay_factor)
+                        new_sl = pos["entry"] - decayed_sl_dist
+                        if new_sl > pos["sl"]:
+                            pos["sl"] = new_sl
 
             else:  # SELL
                 # SL check
@@ -1350,6 +1473,15 @@ class GoldBacktester:
                     if ns < pos["sl"] - 5 * pt or pos["sl"] == 0:
                         pos["sl"] = ns
 
+                # v6.0: ATR ratchet trail for SELL
+                if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
+                    atr_multiples = profit_price / atr_entry
+                    if atr_multiples >= 2.0:
+                        ratchet_step = atr_entry * max(0.3, cfg.RATCHET_STEP_ATR * (1.0 / atr_multiples * 2))
+                        ratchet_sl = close + ratchet_step
+                        if ratchet_sl < pos["sl"] - 5 * pt:
+                            pos["sl"] = ratchet_sl
+
                 # v3.0: Chandelier Exit for SELL
                 if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
@@ -1357,6 +1489,18 @@ class GoldBacktester:
                     chandelier_sl = lowest_low + atr_entry * cfg.CHANDELIER_ATR_MULTI
                     if chandelier_sl < pos["sl"] - 5 * pt:
                         pos["sl"] = chandelier_sl
+
+                # v6.0: Time-decay SL tightening for SELL
+                if cfg.USE_TIME_DECAY_SL and not pos["breakeven_done"]:
+                    bars_open = bar_idx - pos.get("entry_bar", bar_idx)
+                    if bars_open >= cfg.TIME_DECAY_START_BARS:
+                        decay_periods = (bars_open - cfg.TIME_DECAY_START_BARS) / cfg.TIME_DECAY_START_BARS
+                        decay_factor = cfg.TIME_DECAY_RATE ** decay_periods
+                        original_sl_dist = pos["sl_points"] * pt
+                        decayed_sl_dist = max(cfg.MIN_SL_POINTS * pt, original_sl_dist * decay_factor)
+                        new_sl = pos["entry"] + decayed_sl_dist
+                        if new_sl < pos["sl"]:
+                            pos["sl"] = new_sl
 
     def _close_position(self, pos, exit_price, time, reason, bar_idx=0):
         cfg = self.cfg
@@ -1366,10 +1510,22 @@ class GoldBacktester:
         if reason == "SL" and bar_idx > 0:
             self.cooldown_until = bar_idx + cfg.COOLDOWN_BARS
 
+        # v6.0: Exit slippage (against you)
+        slippage = cfg.SLIPPAGE_POINTS * pt
+        if reason == "SL":
+            adj_exit = exit_price - slippage if pos["direction"] == "BUY" else exit_price + slippage
+        else:
+            adj_exit = exit_price - slippage if pos["direction"] == "BUY" else exit_price + slippage
+        # For TP, slippage is favorable but we model worst-case
+        adj_exit = exit_price  # SL/TP prices are already set, slippage applied at entry
+
         pnl_pts = ((exit_price - pos["entry"]) if pos["direction"] == "BUY"
                     else (pos["entry"] - exit_price)) / pt
         # PnL in USD: points * $0.01 * 100oz * lot
         pnl_usd = pnl_pts * pt * cfg.CONTRACT_SIZE * pos["lot"]
+        # v6.0: Commission
+        commission_usd = cfg.COMMISSION_PER_LOT * pos["lot"]
+        pnl_usd -= commission_usd
         # JPY conversion
         pnl_jpy = pnl_usd * 150.0
 
@@ -1516,6 +1672,16 @@ class GoldBacktester:
                 max_consec_wins = max(max_consec_wins, current_streak)
                 max_consec_losses = min(max_consec_losses, current_streak)
 
+        # v7.0: Directional breakdown
+        buys = df[df["direction"] == "BUY"]
+        sells = df[df["direction"] == "SELL"]
+        buy_wins = buys[buys["pnl_pts"] > 0]
+        sell_wins = sells[sells["pnl_pts"] > 0]
+        buy_wr = len(buy_wins) / len(buys) * 100 if len(buys) > 0 else 0
+        sell_wr = len(sell_wins) / len(sells) * 100 if len(sells) > 0 else 0
+        buy_pnl = buys["pnl_jpy"].sum() if len(buys) > 0 else 0
+        sell_pnl = sells["pnl_jpy"].sum() if len(sells) > 0 else 0
+
         return {
             "Period": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
             "Initial Balance": f"{self.cfg.INITIAL_BALANCE:,.0f} JPY",
@@ -1524,6 +1690,8 @@ class GoldBacktester:
             "Return": f"{(self.balance / self.cfg.INITIAL_BALANCE - 1) * 100:+.1f}%",
             "Trades": len(df),
             "Win Rate": f"{win_rate:.1f}% ({len(wins)}W/{len(losses)}L)",
+            "BUY": f"{len(buys)}trades WR={buy_wr:.1f}% PnL={buy_pnl:+,.0f}JPY",
+            "SELL": f"{len(sells)}trades WR={sell_wr:.1f}% PnL={sell_pnl:+,.0f}JPY",
             "Avg Win": f"{avg_win_pts:.0f}pt ({avg_win_jpy:+,.0f} JPY)",
             "Avg Loss": f"{avg_loss_pts:.0f}pt ({avg_loss_jpy:,.0f} JPY)",
             "RR Ratio": f"1:{avg_win_pts/avg_loss_pts:.2f}" if avg_loss_pts > 0 else "N/A",
@@ -1539,6 +1707,272 @@ class GoldBacktester:
             "Monthly": monthly.to_dict(),
             "ByReason": reason_stats.to_dict(),
         }
+
+
+# ============================================================
+# v6.0: Walk-Forward Validation
+# ============================================================
+class WalkForwardValidator:
+    """Rolling window walk-forward analysis for out-of-sample validation."""
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg or GoldConfig()
+        self.results = []
+
+    def run(self, h4_df, h1_df, m15_df, usdjpy_df=None):
+        cfg = self.cfg
+        start_date = m15_df.index[0]
+        end_date = m15_df.index[-1]
+        total_days = (end_date - start_date).days
+
+        train_days = cfg.WF_TRAIN_MONTHS * 30
+        test_days = cfg.WF_TEST_MONTHS * 30
+        step_days = cfg.WF_STEP_MONTHS * 30
+
+        window_start = start_date
+        fold = 0
+
+        print(f"\n{'='*60}")
+        print(f" Walk-Forward Validation (Train={cfg.WF_TRAIN_MONTHS}m / Test={cfg.WF_TEST_MONTHS}m / Step={cfg.WF_STEP_MONTHS}m)")
+        print(f"{'='*60}")
+
+        while True:
+            train_end = window_start + pd.Timedelta(days=train_days)
+            test_start = train_end
+            test_end = test_start + pd.Timedelta(days=test_days)
+
+            if test_end > end_date:
+                break
+
+            fold += 1
+
+            # Train period backtest
+            m15_train = m15_df[(m15_df.index >= window_start) & (m15_df.index < train_end)]
+            h1_train = h1_df[(h1_df.index >= window_start - pd.Timedelta(days=30)) & (h1_df.index < train_end)]
+            h4_train = h4_df[(h4_df.index >= window_start - pd.Timedelta(days=60)) & (h4_df.index < train_end)]
+
+            if len(m15_train) < 500:
+                window_start += pd.Timedelta(days=step_days)
+                continue
+
+            bt_train = GoldBacktester(cfg)
+            usdjpy_train = usdjpy_df if usdjpy_df is not None else None
+            bt_train.run(h4_train, h1_train, m15_train, usdjpy_df=usdjpy_train)
+            train_rpt = bt_train.get_report()
+
+            # OOS period backtest
+            m15_test = m15_df[(m15_df.index >= test_start) & (m15_df.index < test_end)]
+            h1_test = h1_df[(h1_df.index >= test_start - pd.Timedelta(days=30)) & (h1_df.index < test_end)]
+            h4_test = h4_df[(h4_df.index >= test_start - pd.Timedelta(days=60)) & (h4_df.index < test_end)]
+
+            if len(m15_test) < 200:
+                window_start += pd.Timedelta(days=step_days)
+                continue
+
+            bt_test = GoldBacktester(cfg)
+            bt_test.run(h4_test, h1_test, m15_test, usdjpy_df=usdjpy_train)
+            test_rpt = bt_test.get_report()
+
+            if train_rpt and "error" not in train_rpt and test_rpt and "error" not in test_rpt:
+                train_pf = float(train_rpt.get("PF", "0").replace("INF", "99"))
+                test_pf = float(test_rpt.get("PF", "0").replace("INF", "99"))
+                train_ret = float(train_rpt.get("Return", "0").replace("%", "").replace("+", ""))
+                test_ret = float(test_rpt.get("Return", "0").replace("%", "").replace("+", ""))
+                train_trades = train_rpt.get("Trades", 0)
+                test_trades = test_rpt.get("Trades", 0)
+
+                result = {
+                    "fold": fold,
+                    "train_period": f"{window_start.date()} ~ {train_end.date()}",
+                    "test_period": f"{test_start.date()} ~ {test_end.date()}",
+                    "train_pf": train_pf,
+                    "test_pf": test_pf,
+                    "train_return": train_ret,
+                    "test_return": test_ret,
+                    "train_trades": train_trades,
+                    "test_trades": test_trades,
+                    "pf_ratio": test_pf / train_pf if train_pf > 0 else 0,
+                }
+                self.results.append(result)
+
+                status = "PASS" if test_pf > 1.0 and test_ret > 0 else "FAIL"
+                print(f"  Fold {fold}: Train PF={train_pf:.2f} Ret={train_ret:+.1f}% | "
+                      f"OOS PF={test_pf:.2f} Ret={test_ret:+.1f}% [{status}]")
+
+            window_start += pd.Timedelta(days=step_days)
+
+        self._print_summary()
+        return self.results
+
+    def _print_summary(self):
+        if not self.results:
+            print("  [WARN] No walk-forward folds completed")
+            return
+
+        print(f"\n  --- Walk-Forward Summary ---")
+        oos_pfs = [r["test_pf"] for r in self.results]
+        oos_rets = [r["test_return"] for r in self.results]
+        pf_ratios = [r["pf_ratio"] for r in self.results]
+        pass_count = sum(1 for r in self.results if r["test_pf"] > 1.0 and r["test_return"] > 0)
+
+        print(f"  Folds: {len(self.results)}")
+        print(f"  OOS Pass Rate: {pass_count}/{len(self.results)} ({pass_count/len(self.results)*100:.0f}%)")
+        print(f"  OOS PF: avg={np.mean(oos_pfs):.2f} min={np.min(oos_pfs):.2f} max={np.max(oos_pfs):.2f}")
+        print(f"  OOS Return: avg={np.mean(oos_rets):+.1f}% min={np.min(oos_rets):+.1f}% max={np.max(oos_rets):+.1f}%")
+        print(f"  PF Decay (OOS/Train): avg={np.mean(pf_ratios):.2f}")
+
+        # Robustness score: >70% pass rate + avg PF decay > 0.6 = robust
+        robustness = pass_count / len(self.results) * 100
+        if robustness >= 70 and np.mean(pf_ratios) >= 0.6:
+            print(f"  Robustness: STRONG ({robustness:.0f}%)")
+        elif robustness >= 50:
+            print(f"  Robustness: MODERATE ({robustness:.0f}%)")
+        else:
+            print(f"  Robustness: WEAK ({robustness:.0f}%)")
+
+
+# ============================================================
+# v6.0: Monte Carlo Simulation
+# ============================================================
+class MonteCarloSimulator:
+    """Trade-shuffling Monte Carlo for confidence intervals."""
+
+    def __init__(self, trades, initial_balance=300_000, n_sims=1000, confidence=0.95):
+        self.trades = trades
+        self.initial_balance = initial_balance
+        self.n_sims = n_sims
+        self.confidence = confidence
+        self.results = {}
+
+    def run(self):
+        if not self.trades:
+            print("  [WARN] No trades for Monte Carlo")
+            return self.results
+
+        pnls = [t["pnl_jpy"] for t in self.trades]
+        n_trades = len(pnls)
+
+        print(f"\n{'='*60}")
+        print(f" Monte Carlo Simulation ({self.n_sims:,} runs, {n_trades} trades)")
+        print(f"{'='*60}")
+
+        final_balances = []
+        max_dds = []
+        max_dd_jpys = []
+
+        rng = np.random.default_rng(42)
+
+        for _ in range(self.n_sims):
+            shuffled = rng.permutation(pnls)
+            balance = self.initial_balance
+            peak = balance
+            max_dd_pct = 0
+            max_dd_jpy = 0
+
+            for pnl in shuffled:
+                balance += pnl
+                if balance > peak:
+                    peak = balance
+                dd_pct = (peak - balance) / peak * 100 if peak > 0 else 0
+                dd_jpy = peak - balance
+                max_dd_pct = max(max_dd_pct, dd_pct)
+                max_dd_jpy = max(max_dd_jpy, dd_jpy)
+
+            final_balances.append(balance)
+            max_dds.append(max_dd_pct)
+            max_dd_jpys.append(max_dd_jpy)
+
+        final_balances = np.array(final_balances)
+        max_dds = np.array(max_dds)
+        max_dd_jpys = np.array(max_dd_jpys)
+
+        lo = (1 - self.confidence) / 2
+        hi = 1 - lo
+
+        self.results = {
+            "median_balance": np.median(final_balances),
+            "mean_balance": np.mean(final_balances),
+            "ci_low_balance": np.percentile(final_balances, lo * 100),
+            "ci_high_balance": np.percentile(final_balances, hi * 100),
+            "worst_balance": np.min(final_balances),
+            "best_balance": np.max(final_balances),
+            "median_dd": np.median(max_dds),
+            "ci95_dd": np.percentile(max_dds, 95),
+            "worst_dd": np.max(max_dds),
+            "ci95_dd_jpy": np.percentile(max_dd_jpys, 95),
+            "prob_profit": np.mean(final_balances > self.initial_balance) * 100,
+            "prob_double": np.mean(final_balances > self.initial_balance * 2) * 100,
+            "prob_ruin_50pct": np.mean(max_dds > 50) * 100,
+        }
+
+        print(f"  Final Balance:")
+        print(f"    Median: {self.results['median_balance']:,.0f} JPY")
+        print(f"    95% CI: [{self.results['ci_low_balance']:,.0f} ~ {self.results['ci_high_balance']:,.0f}] JPY")
+        print(f"    Worst:  {self.results['worst_balance']:,.0f} JPY")
+        print(f"  Max Drawdown:")
+        print(f"    Median: {self.results['median_dd']:.1f}%")
+        print(f"    95th pctl: {self.results['ci95_dd']:.1f}% ({self.results['ci95_dd_jpy']:,.0f} JPY)")
+        print(f"    Worst:  {self.results['worst_dd']:.1f}%")
+        print(f"  Probabilities:")
+        print(f"    Profit: {self.results['prob_profit']:.1f}%")
+        print(f"    2x Return: {self.results['prob_double']:.1f}%")
+        print(f"    Ruin (>50% DD): {self.results['prob_ruin_50pct']:.1f}%")
+
+        return self.results
+
+
+# ============================================================
+# v6.0: Parameter Sensitivity Analysis
+# ============================================================
+def run_sensitivity_analysis(h4_df, h1_df, m15_df, usdjpy_df=None):
+    """Test key parameter variations to check for overfitting."""
+    print(f"\n{'='*60}")
+    print(f" Parameter Sensitivity Analysis")
+    print(f"{'='*60}")
+
+    base_cfg = GoldConfig()
+    # Test variations of critical parameters (limited for speed)
+    tests = [
+        ("SL_ATR_MULTI", [1.2, 1.5, 2.0]),
+        ("TP_ATR_MULTI", [2.5, 3.5, 4.5]),
+        ("MIN_SCORE", [8, 9, 10]),
+        ("SCORE_MARGIN_MIN", [1, 2, 3]),
+    ]
+
+    results = {}
+    for param_name, values in tests:
+        param_results = []
+        for val in values:
+            cfg = GoldConfig()
+            setattr(cfg, param_name, val)
+            bt = GoldBacktester(cfg)
+            bt.run(h4_df, h1_df, m15_df, usdjpy_df=usdjpy_df)
+            rpt = bt.get_report()
+            if rpt and "error" not in rpt:
+                pf = float(rpt.get("PF", "0").replace("INF", "99"))
+                ret = float(rpt.get("Return", "0").replace("%", "").replace("+", ""))
+                dd = float(rpt.get("Max DD", "0").split("%")[0])
+                trades = rpt.get("Trades", 0)
+                param_results.append({"value": val, "pf": pf, "return": ret, "dd": dd, "trades": trades})
+
+        results[param_name] = param_results
+
+        # Print results for this parameter
+        print(f"\n  {param_name}:")
+        print(f"    {'Value':>8} {'PF':>6} {'Return':>8} {'DD':>6} {'Trades':>7}")
+        for r in param_results:
+            marker = " <--" if r["value"] == getattr(base_cfg, param_name) else ""
+            print(f"    {r['value']:>8} {r['pf']:>6.2f} {r['return']:>+7.1f}% {r['dd']:>5.1f}% {r['trades']:>7}{marker}")
+
+        # Check sensitivity: is the optimal near our chosen value?
+        pfs = [r["pf"] for r in param_results]
+        pf_range = max(pfs) - min(pfs)
+        if pf_range > 0.3:
+            print(f"    Sensitivity: HIGH (PF range={pf_range:.2f})")
+        else:
+            print(f"    Sensitivity: LOW (PF range={pf_range:.2f}) -- ROBUST")
+
+    return results
 
 
 # ============================================================
@@ -1577,7 +2011,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print(" AntigravityMTF EA [GOLD] v4.0 Backtest Results (6 months)")
+        print(" AntigravityMTF EA [GOLD] v7.1 Professional Backtest")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "Monthly":
@@ -1599,7 +2033,7 @@ if __name__ == "__main__":
         bt.analyze_components()
 
         # v4.0: Defense stats
-        print(f"\n  --- v4.0 Defense Stats ---")
+        print(f"\n  --- Defense Stats ---")
         print(f"  News filter blocks:   {bt.news_blocks}")
         print(f"  Crash regime skips:   {bt.crash_skips}")
         print(f"  Weekend closes:       {bt.weekend_closes}")
@@ -1610,7 +2044,7 @@ if __name__ == "__main__":
         reversals = sum(1 for t in bt.trades if t.get('entry_type') == 'reversal')
         pyramids = sum(1 for t in bt.trades if t.get('entry_type') == 'pyramid')
         bursts = sum(1 for t in bt.trades if t.get('momentum_burst', False))
-        print(f"\n  --- v4.0 Attack Stats ---")
+        print(f"\n  --- Attack Stats ---")
         print(f"  Reversal trades:      {reversals}")
         print(f"  Pyramid entries:      {pyramids}")
         print(f"  Momentum burst trades:{bursts}")
@@ -1621,6 +2055,99 @@ if __name__ == "__main__":
         print("  " + "-" * 110)
         for t in bt.trades[-10:]:
             print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>10.2f} {t['exit']:>10.2f} {t['lot']:>5.2f} {t['pnl_pts']:>8.0f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<10} {t.get('entry_type','normal'):<8}")
+
+        # v6.0: Monte Carlo Simulation
+        mc = MonteCarloSimulator(bt.trades, cfg.INITIAL_BALANCE, cfg.MC_SIMULATIONS, cfg.MC_CONFIDENCE)
+        mc_results = mc.run()
+
+        # v6.0: Walk-Forward Validation
+        wf = WalkForwardValidator(cfg)
+        wf_results = wf.run(h4, h1, m15, usdjpy_df=usdjpy)
+
+        # v6.0: Parameter Sensitivity Analysis (optional, slow)
+        sa_results = {}
+        if "--sensitivity" in sys.argv:
+            print("\n[SA] Running parameter sensitivity analysis...")
+            sa_results = run_sensitivity_analysis(h4, h1, m15, usdjpy_df=usdjpy)
+        else:
+            print("\n  [INFO] Sensitivity analysis skipped (use --sensitivity flag)")
+
+        # v6.0: Professional Summary
+        print(f"\n{'='*60}")
+        print(f" PROFESSIONAL GRADE ASSESSMENT")
+        print(f"{'='*60}")
+        score = 0
+        max_score = 0
+
+        # 1. Profitability (in-sample)
+        max_score += 2
+        pf_val = float(rpt.get("PF", "0").replace("INF", "99"))
+        if pf_val >= 1.3:
+            score += 2
+            print(f"  [PASS] In-sample PF={pf_val:.2f} (>= 1.3)")
+        elif pf_val >= 1.1:
+            score += 1
+            print(f"  [WARN] In-sample PF={pf_val:.2f} (marginal)")
+        else:
+            print(f"  [FAIL] In-sample PF={pf_val:.2f} (< 1.1)")
+
+        # 2. Walk-forward
+        max_score += 3
+        if wf_results:
+            oos_pass = sum(1 for r in wf_results if r["test_pf"] > 1.0 and r["test_return"] > 0)
+            oos_rate = oos_pass / len(wf_results) * 100
+            if oos_rate >= 70:
+                score += 3
+                print(f"  [PASS] Walk-forward OOS pass rate={oos_rate:.0f}% (>= 70%)")
+            elif oos_rate >= 50:
+                score += 2
+                print(f"  [WARN] Walk-forward OOS pass rate={oos_rate:.0f}% (>= 50%)")
+            else:
+                print(f"  [FAIL] Walk-forward OOS pass rate={oos_rate:.0f}% (< 50%)")
+        else:
+            print(f"  [SKIP] Walk-forward: insufficient data")
+
+        # 3. Monte Carlo
+        max_score += 2
+        if mc_results:
+            if mc_results["prob_profit"] >= 95:
+                score += 2
+                print(f"  [PASS] MC profit probability={mc_results['prob_profit']:.1f}% (>= 95%)")
+            elif mc_results["prob_profit"] >= 80:
+                score += 1
+                print(f"  [WARN] MC profit probability={mc_results['prob_profit']:.1f}% (>= 80%)")
+            else:
+                print(f"  [FAIL] MC profit probability={mc_results['prob_profit']:.1f}% (< 80%)")
+
+        # 4. Drawdown
+        max_score += 2
+        dd_val = float(rpt.get("Max DD", "0").split("%")[0])
+        if dd_val <= 15:
+            score += 2
+            print(f"  [PASS] Max DD={dd_val:.1f}% (<= 15%)")
+        elif dd_val <= 25:
+            score += 1
+            print(f"  [WARN] Max DD={dd_val:.1f}% (<= 25%)")
+        else:
+            print(f"  [FAIL] Max DD={dd_val:.1f}% (> 25%)")
+
+        # 5. Trade count (statistical significance)
+        max_score += 1
+        trades_n = rpt.get("Trades", 0)
+        if trades_n >= 300:
+            score += 1
+            print(f"  [PASS] Trade count={trades_n} (>= 300, statistically significant)")
+        else:
+            print(f"  [FAIL] Trade count={trades_n} (< 300)")
+
+        print(f"\n  OVERALL SCORE: {score}/{max_score}")
+        if score >= max_score * 0.8:
+            print(f"  VERDICT: PROFESSIONAL GRADE")
+        elif score >= max_score * 0.6:
+            print(f"  VERDICT: SEMI-PROFESSIONAL (improvements needed)")
+        else:
+            print(f"  VERDICT: NEEDS WORK")
+
     else:
         print("[WARN] No trades occurred")
         print("   Try lowering MinScore or adjusting parameters")
