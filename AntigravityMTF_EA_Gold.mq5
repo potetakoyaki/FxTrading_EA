@@ -148,7 +148,7 @@ input int    RegimeScoreBoost   = 3;       // Extra minScore in ranging
 //+------------------------------------------------------------------+
 CTrade         trade;
 double         peakBalance;
-int            h_h4_ma_fast, h_h4_ma_slow, h_h4_adx;
+int            h_h4_ma_fast, h_h4_ma_slow, h_h4_adx, h_h4_sma50;
 int            h_h1_ma_fast, h_h1_ma_slow, h_h1_rsi, h_h1_bb;
 int            h_m15_ma_fast, h_m15_ma_slow;
 int            h_m15_atr;                 // M15 ATR（動的SL/TP用）
@@ -167,9 +167,6 @@ int            h_usdjpy_ma_fast, h_usdjpy_ma_slow, h_usdjpy_atr;
 double         recentTradeResults[50];
 int            tradeResultIndex;
 int            tradeResultCount;
-int            compWins[12];
-int            compTotal[12];
-double         compWeights[12];
 int            totalTradesTracked;
 bool           g_UseCorrelation;          // 実行時フラグ（シンボル不可時false）
 
@@ -181,12 +178,22 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(30);
    peakBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   trade.SetTypeFilling(ORDER_FILLING_FOK);
+   // ブローカー環境に応じたフィルポリシーを動的判定
+   ENUM_ORDER_TYPE_FILLING fillType = ORDER_FILLING_FOK;  // デフォルト
+   long fillMode = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fillMode & SYMBOL_FILLING_FOK) != 0)
+      fillType = ORDER_FILLING_FOK;
+   else if((fillMode & SYMBOL_FILLING_IOC) != 0)
+      fillType = ORDER_FILLING_IOC;
+   else
+      fillType = ORDER_FILLING_RETURN;
+   trade.SetTypeFilling(fillType);
 
    // H4 インジケーター
    h_h4_ma_fast = iMA(_Symbol, PERIOD_H4, H4_MA_Fast, 0, MODE_SMA, PRICE_CLOSE);
    h_h4_ma_slow = iMA(_Symbol, PERIOD_H4, H4_MA_Slow, 0, MODE_SMA, PRICE_CLOSE);
    h_h4_adx     = iADX(_Symbol, PERIOD_H4, H4_ADX_Period);
+   h_h4_sma50   = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE);
 
    // H1 インジケーター
    h_h1_ma_fast = iMA(_Symbol, PERIOD_H1, H1_MA_Fast, 0, MODE_EMA, PRICE_CLOSE);
@@ -203,7 +210,8 @@ int OnInit()
 
    // ハンドル検証
    if(h_h4_ma_fast == INVALID_HANDLE || h_h4_ma_slow == INVALID_HANDLE ||
-      h_h4_adx == INVALID_HANDLE || h_h1_ma_fast == INVALID_HANDLE ||
+      h_h4_adx == INVALID_HANDLE || h_h4_sma50 == INVALID_HANDLE ||
+      h_h1_ma_fast == INVALID_HANDLE ||
       h_h1_ma_slow == INVALID_HANDLE || h_h1_rsi == INVALID_HANDLE ||
       h_h1_bb == INVALID_HANDLE || h_m15_ma_fast == INVALID_HANDLE ||
       h_m15_ma_slow == INVALID_HANDLE || h_m15_atr == INVALID_HANDLE)
@@ -252,18 +260,11 @@ int OnInit()
       }
    }
 
-   // v3.0: コンポーネントウェイト初期化
-   for(int i = 0; i < 12; i++)
-   {
-      compWeights[i] = 1.0;
-      compWins[i]    = 0;
-      compTotal[i]   = 0;
-   }
    tradeResultIndex  = 0;
    tradeResultCount  = 0;
    totalTradesTracked = 0;
    ArrayInitialize(recentTradeResults, 0.0);
-   LoadWeights();
+   LoadTradeResults();
 
    // v4.0: 初期化
    g_dailyPnL = 0;
@@ -297,6 +298,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(h_h4_ma_fast);
    IndicatorRelease(h_h4_ma_slow);
    IndicatorRelease(h_h4_adx);
+   IndicatorRelease(h_h4_sma50);
    IndicatorRelease(h_h1_ma_fast);
    IndicatorRelease(h_h1_ma_slow);
    IndicatorRelease(h_h1_rsi);
@@ -311,7 +313,7 @@ void OnDeinit(const int reason)
    if(h_usdjpy_ma_slow != INVALID_HANDLE) IndicatorRelease(h_usdjpy_ma_slow);
    if(h_usdjpy_atr != INVALID_HANDLE)     IndicatorRelease(h_usdjpy_atr);
 
-   SaveWeights();
+   SaveTradeResults();
 }
 
 //+------------------------------------------------------------------+
@@ -506,23 +508,16 @@ void OnTick()
       tpDist *= 1.5;
 
    // v7.0: トレンドアライメントSL/TP調整
-   // H4 SMA(50) slope で順/逆トレンド判定
-   double h4Sma50_now  = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE) != INVALID_HANDLE ?
-                         GetIndicatorValue(iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE), 0, 1) : 0;
-   double h4Sma50_prev = h4Sma50_now;  // fallback
+   // H4 SMA(50) slope で順/逆トレンド判定（OnInitで作成済みのh_h4_sma50を使用）
+   double h4Sma50_now  = 0;
+   double h4Sma50_prev = 0;
    {
-      // slope判定: 現在SMA(50) vs H4_Slope_Period前のSMA(50)
       double smaValues[];
-      int h4SmaHandle = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE);
-      if(h4SmaHandle != INVALID_HANDLE)
+      ArraySetAsSeries(smaValues, true);
+      if(CopyBuffer(h_h4_sma50, 0, 0, H4_Slope_Period + 1, smaValues) >= H4_Slope_Period + 1)
       {
-         ArraySetAsSeries(smaValues, true);
-         if(CopyBuffer(h4SmaHandle, 0, 0, H4_Slope_Period + 1, smaValues) >= H4_Slope_Period + 1)
-         {
-            h4Sma50_now  = smaValues[0];
-            h4Sma50_prev = smaValues[H4_Slope_Period];
-         }
-         IndicatorRelease(h4SmaHandle);
+         h4Sma50_now  = smaValues[0];
+         h4Sma50_prev = smaValues[H4_Slope_Period];
       }
    }
    double h4Slope = h4Sma50_now - h4Sma50_prev;
@@ -1259,17 +1254,11 @@ double GetAdaptiveRisk()
 }
 
 //+------------------------------------------------------------------+
-//| v3.0: ウェイト保存（GlobalVariable使用）                           |
+//| トレード結果保存（GlobalVariable使用・Kelly計算用）                 |
 //+------------------------------------------------------------------+
-void SaveWeights()
+void SaveTradeResults()
 {
    string prefix = "AGMTF_";
-   for(int i = 0; i < 12; i++)
-   {
-      GlobalVariableSet(prefix + "W_" + IntegerToString(i), compWeights[i]);
-      GlobalVariableSet(prefix + "CW_" + IntegerToString(i), (double)compWins[i]);
-      GlobalVariableSet(prefix + "CT_" + IntegerToString(i), (double)compTotal[i]);
-   }
    GlobalVariableSet(prefix + "TotalTracks", (double)totalTradesTracked);
    GlobalVariableSet(prefix + "ResultCount", (double)tradeResultCount);
    GlobalVariableSet(prefix + "ResultIndex", (double)tradeResultIndex);
@@ -1279,22 +1268,13 @@ void SaveWeights()
 }
 
 //+------------------------------------------------------------------+
-//| v3.0: ウェイト読込（GlobalVariable使用）                           |
+//| トレード結果読込（GlobalVariable使用・Kelly計算用）                 |
 //+------------------------------------------------------------------+
-void LoadWeights()
+void LoadTradeResults()
 {
    string prefix = "AGMTF_";
    if(!GlobalVariableCheck(prefix + "TotalTracks")) return;
 
-   for(int i = 0; i < 12; i++)
-   {
-      if(GlobalVariableCheck(prefix + "W_" + IntegerToString(i)))
-         compWeights[i] = GlobalVariableGet(prefix + "W_" + IntegerToString(i));
-      if(GlobalVariableCheck(prefix + "CW_" + IntegerToString(i)))
-         compWins[i] = (int)GlobalVariableGet(prefix + "CW_" + IntegerToString(i));
-      if(GlobalVariableCheck(prefix + "CT_" + IntegerToString(i)))
-         compTotal[i] = (int)GlobalVariableGet(prefix + "CT_" + IntegerToString(i));
-   }
    totalTradesTracked = (int)GlobalVariableGet(prefix + "TotalTracks");
    tradeResultCount   = (int)GlobalVariableGet(prefix + "ResultCount");
    tradeResultIndex   = (int)GlobalVariableGet(prefix + "ResultIndex");
@@ -1303,25 +1283,6 @@ void LoadWeights()
    {
       if(GlobalVariableCheck(prefix + "TR_" + IntegerToString(i)))
          recentTradeResults[i] = GlobalVariableGet(prefix + "TR_" + IntegerToString(i));
-   }
-}
-
-//+------------------------------------------------------------------+
-//| v3.0: コンポーネントウェイト再計算                                 |
-//+------------------------------------------------------------------+
-void RecalcWeights()
-{
-   for(int i = 0; i < 12; i++)
-   {
-      if(compTotal[i] >= 5)
-      {
-         double winRate = (double)compWins[i] / (double)compTotal[i];
-         compWeights[i] = 0.5 + winRate;  // 0.5〜1.5の範囲
-      }
-      else
-      {
-         compWeights[i] = 1.0;
-      }
    }
 }
 
@@ -1571,35 +1532,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             if(tradeResultCount < 50) tradeResultCount++;
 
             totalTradesTracked++;
-
-            // コンポーネントマスクをコメントから解析
-            string dealComment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
-            int maskPos = StringFind(dealComment, "M:");
-            if(maskPos >= 0)
-            {
-               string maskStr = StringSubstr(dealComment, maskPos + 2);
-               // maskStrから数値部分を抽出（スペースまたは次の非数字まで）
-               int spacePos = StringFind(maskStr, " ");
-               if(spacePos > 0) maskStr = StringSubstr(maskStr, 0, spacePos);
-               int mask = (int)StringToInteger(maskStr);
-
-               bool isWin = (netResult > 0);
-               for(int bit = 0; bit < 12; bit++)
-               {
-                  if((mask & (1 << bit)) != 0)
-                  {
-                     compTotal[bit]++;
-                     if(isWin) compWins[bit]++;
-                  }
-               }
-            }
-
-            // 20トレード以降、5トレードごとにウェイト再計算
-            if(totalTradesTracked >= 20 && totalTradesTracked % 5 == 0)
-            {
-               RecalcWeights();
-               Print("v3.0: コンポーネントウェイト再計算完了 (トレード#", totalTradesTracked, ")");
-            }
          }
       }
    }
@@ -1765,9 +1697,7 @@ bool CheckReversal(int &reversalDirection)
 {
    if(!UseReversalMode) return false;
 
-   double rsi = GetIndicatorValue(h_m15_rsi, 0, 1);
-   // M15 RSIハンドルがないのでH1 RSIを使用
-   rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
+   double rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(rsi == 0) return false;
 
    int divSignal = GetDivergence();
