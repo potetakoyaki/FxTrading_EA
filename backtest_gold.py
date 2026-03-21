@@ -21,10 +21,8 @@ v7.0: Symmetric Trend-Following (Bull/Bear balanced)
       - S/R levels: removed counter-direction penalty (was +1/-1, now +1 only)
       - Trend-aligned TP adjustment: extend TP with-trend, tighten counter-trend
       - BUY/SELL directional breakdown in report
-v7.1: Trend Quality Filter (weak trend protection)
-      - Weak trend detection: ADX < 25 OR slope/ATR < 0.3
-      - Weak trend: MIN_SCORE +1, lot x0.5, cooldown x1.5
-      - Reduces exposure in choppy markets without killing trade signals
+      (v7.1 weak-trend filter tested and reverted: no improvement in 2023-24
+       due to scoring system having zero predictive power in range markets)
 """
 
 import pandas as pd
@@ -157,14 +155,6 @@ class GoldConfig:
     MAX_PYRAMID_POSITIONS = 3
     PYRAMID_LOT_DECAY = 0.5
     USE_REVERSAL_MODE = True
-
-    # v7.1: Trend quality filter (weak trend = reduced exposure)
-    USE_TREND_QUALITY_FILTER = True
-    WEAK_TREND_ADX = 25              # ADX below this = weak trend
-    WEAK_TREND_SLOPE_ATR = 0.3       # abs(slope)/ATR below this = no clear direction
-    WEAK_TREND_SCORE_BOOST = 1       # Mild MIN_SCORE boost
-    WEAK_TREND_LOT_REDUCE = 0.5     # Halve position size in weak trends
-    WEAK_TREND_COOLDOWN_MULTI = 1.5  # Mild cooldown extension after SL
 
     # v6.0 Professional
     # Transaction costs
@@ -903,24 +893,12 @@ class GoldBacktester:
 
             # 1b. v5.2: Macro trend direction from MA50 slope
             macro_trend_dir = 0  # +1=up, -1=down
-            weak_trend = False   # v7.1: trend quality flag
             if pd.notna(h4_row.get("ma_slow_slope")):
                 slope = h4_row["ma_slow_slope"]
                 if slope > 0:
                     macro_trend_dir = 1
                 elif slope < 0:
                     macro_trend_dir = -1
-
-                # v7.1: Trend quality detection
-                # Weak trend = small slope relative to ATR OR low ADX
-                if cfg.USE_TREND_QUALITY_FILTER:
-                    h4_adx = h4_row.get("adx", 30)
-                    slope_vs_atr = abs(slope) / current_atr if current_atr > 0 else 0
-                    if (pd.notna(h4_adx) and h4_adx < cfg.WEAK_TREND_ADX) or \
-                       slope_vs_atr < cfg.WEAK_TREND_SLOPE_ATR:
-                        weak_trend = True
-
-            self._current_weak_trend = weak_trend  # v7.1: for cooldown scaling
 
             # 2. H1 MA direction (2 pts)
             if pd.notna(h1_curr["ma_fast"]) and pd.notna(h1_curr["ma_slow"]):
@@ -1084,9 +1062,6 @@ class GoldBacktester:
                 dynamic_min_score = 12
             if regime == 1:  # Ranging
                 dynamic_min_score += 3
-            # v7.1: Weak trend = raise score threshold (avoid choppy market whipsaws)
-            if weak_trend:
-                dynamic_min_score += cfg.WEAK_TREND_SCORE_BOOST
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -1098,11 +1073,6 @@ class GoldBacktester:
             # v4.0: Momentum burst TP multiplier
             tp_multi = 1.5 if abs(burst) == 3 else 1.0
             adjusted_tp_points = dynamic_tp_points * tp_multi
-
-            # v7.1: Weak trend lot reduction (reduce exposure in choppy markets)
-            weak_trend_lot_multi = 1.0
-            if weak_trend:
-                weak_trend_lot_multi = cfg.WEAK_TREND_LOT_REDUCE
 
             # ---- v4.0: Pyramiding support ----
             pos_count = len(self.open_positions)
@@ -1156,14 +1126,14 @@ class GoldBacktester:
                 if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * weak_trend_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
                 elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * weak_trend_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
@@ -1496,12 +1466,9 @@ class GoldBacktester:
         cfg = self.cfg
         pt = cfg.POINT
 
-        # Cooldown after SL (v7.1: extended in weak trends)
+        # Cooldown after SL
         if reason == "SL" and bar_idx > 0:
-            cooldown = cfg.COOLDOWN_BARS
-            if getattr(self, '_current_weak_trend', False):
-                cooldown = int(cfg.COOLDOWN_BARS * cfg.WEAK_TREND_COOLDOWN_MULTI)
-            self.cooldown_until = bar_idx + cooldown
+            self.cooldown_until = bar_idx + cfg.COOLDOWN_BARS
 
         # v6.0: Exit slippage (against you)
         slippage = cfg.SLIPPAGE_POINTS * pt
