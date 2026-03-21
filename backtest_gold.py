@@ -191,26 +191,20 @@ class GoldConfig:
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
-    # Regime detection for MR (uses H4 ADX + ATR ratio)
-    MR_ADX_THRESHOLD = 30           # H4 ADX below this = ranging regime
-    MR_ATR_RATIO_MAX = 1.3          # M15 ATR ratio below this = low-volatility
-    # RSI extremes reversal (two tiers)
-    MR_RSI_OVERBOUGHT = 75          # H1 RSI above this -> strong SELL bonus
-    MR_RSI_OVERSOLD = 25            # H1 RSI below this -> strong BUY bonus
-    MR_RSI_OB_MILD = 70             # Mild overbought
-    MR_RSI_OS_MILD = 30             # Mild oversold
-    MR_RSI_POINTS = 2               # Points for extreme RSI signal
-    MR_RSI_MILD_POINTS = 1          # Points for mild RSI signal
-    # Bollinger Band reversal
-    MR_BB_POINTS = 2                # Points for BB touch reversal
-    # Combo bonus
-    MR_COMBO_BONUS = 1              # Bonus for RSI+BB confirmation
-    # SL/TP for mean-reversion trades
-    MR_SL_ATR_MULTI = 1.2           # Tighter SL for reversion trades
-    MR_TP_ATR_MULTI = 2.0           # Tighter TP for quick exits
-    MR_LOT_SCALE = 0.7              # Smaller lots for reversion trades
-    # Mean-reversion minimum score
-    MR_MIN_SCORE = 2                # Low threshold - RSI extreme alone qualifies
+    MR_ADX_THRESHOLD = 30
+    MR_ATR_RATIO_MAX = 1.3
+    MR_RSI_OVERBOUGHT = 75
+    MR_RSI_OVERSOLD = 25
+    MR_RSI_OB_MILD = 70
+    MR_RSI_OS_MILD = 30
+    MR_RSI_POINTS = 2
+    MR_RSI_MILD_POINTS = 1
+    MR_BB_POINTS = 2
+    MR_COMBO_BONUS = 1
+    MR_SL_ATR_MULTI = 1.2
+    MR_TP_ATR_MULTI = 2.0
+    MR_LOT_SCALE = 0.7
+    MR_MIN_SCORE = 2
 
 
 # ============================================================
@@ -492,72 +486,6 @@ def get_candle_pattern(h1_df, current_time):
 
     return 0
 
-
-
-def get_mean_reversion_score(h1_curr, h1_prev, current_price, current_atr, sr_signal, cfg):
-    """
-    v8.1: Mean-reversion scoring for range-bound markets.
-    Returns (mr_buy_score, mr_sell_score) based on:
-    1. RSI extremes (overbought/oversold reversal, two tiers)
-    2. Bollinger Band reversal (price at/beyond bands + bounce confirmation)
-    3. Combo bonus (multiple signals aligned + S/R confirmation)
-    """
-    mr_buy = 0
-    mr_sell = 0
-
-    rsi_val = h1_curr.get("rsi")
-    if pd.isna(rsi_val):
-        return 0, 0
-
-    # 1. RSI extreme reversal (two tiers)
-    rsi_buy = False
-    rsi_sell = False
-    if rsi_val <= cfg.MR_RSI_OVERSOLD:
-        mr_buy += cfg.MR_RSI_POINTS
-        rsi_buy = True
-    elif rsi_val <= cfg.MR_RSI_OS_MILD:
-        mr_buy += cfg.MR_RSI_MILD_POINTS
-        rsi_buy = True
-    elif rsi_val >= cfg.MR_RSI_OVERBOUGHT:
-        mr_sell += cfg.MR_RSI_POINTS
-        rsi_sell = True
-    elif rsi_val >= cfg.MR_RSI_OB_MILD:
-        mr_sell += cfg.MR_RSI_MILD_POINTS
-        rsi_sell = True
-
-    # 2. Bollinger Band reversal
-    bb_buy = False
-    bb_sell = False
-    bb_upper = h1_curr.get("bb_upper")
-    bb_lower = h1_curr.get("bb_lower")
-
-    if pd.notna(bb_upper) and pd.notna(bb_lower):
-        bw = bb_upper - bb_lower
-        if bw > 0:
-            # Price at or below lower band AND bouncing (close > prev close)
-            if current_price <= bb_lower + current_atr * 0.2:
-                if h1_curr["Close"] > h1_prev["Close"]:
-                    mr_buy += cfg.MR_BB_POINTS
-                    bb_buy = True
-            # Price at or above upper band AND reversing
-            elif current_price >= bb_upper - current_atr * 0.2:
-                if h1_curr["Close"] < h1_prev["Close"]:
-                    mr_sell += cfg.MR_BB_POINTS
-                    bb_sell = True
-
-    # 3. Combo bonus: RSI extreme + BB touch
-    if rsi_buy and bb_buy:
-        mr_buy += cfg.MR_COMBO_BONUS
-    if rsi_sell and bb_sell:
-        mr_sell += cfg.MR_COMBO_BONUS
-
-    # 4. Extra bonus if S/R confirms the reversal
-    if sr_signal == 1 and (rsi_buy or bb_buy):
-        mr_buy += 1
-    if sr_signal == -1 and (rsi_sell or bb_sell):
-        mr_sell += 1
-
-    return mr_buy, mr_sell
 
 
 def get_h4_rsi_alignment(h4_rsi_val, h1_rsi_val):
@@ -868,8 +796,7 @@ class GoldBacktester:
         print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
         if cfg.REGIME_METHOD != 'none':
             print(f"   v8.0: Regime={cfg.REGIME_METHOD} ER_thresh={cfg.REGIME_ER_THRESHOLD} ScoreBoost={cfg.REGIME_SCORE_BOOST}")
-        if cfg.USE_MEAN_REVERSION:
-            print(f"   v8.1: MeanReversion ADX<{cfg.MR_ADX_THRESHOLD} ATR<{cfg.MR_ATR_RATIO_MAX} RSI={cfg.MR_RSI_OVERSOLD}/{cfg.MR_RSI_OVERBOUGHT} MinScore={cfg.MR_MIN_SCORE}")
+
 
         # v8.0: Pre-compute ER regime indicator on H4
         if cfg.REGIME_METHOD == 'er':
@@ -1250,44 +1177,6 @@ class GoldBacktester:
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
-
-            # v8.1: Mean-reversion entry - only in range regime, when no trend entry
-            if not entered and cfg.USE_MEAN_REVERSION and pos_count == 0:
-                # Detect range regime: low H4 ADX + low ATR ratio
-                h4_adx_val = h4_row.get("adx") if pd.notna(h4_row.get("adx")) else 50
-                mr_is_range = (h4_adx_val < cfg.MR_ADX_THRESHOLD and
-                               vol_ratio < cfg.MR_ATR_RATIO_MAX)
-
-                if mr_is_range:
-                    # Re-use S/R signal (already computed for component 11)
-                    sr_for_mr = get_sr_signal(h1_df, ct, cc, current_atr, cfg) if cfg.USE_SR_LEVELS else 0
-                    mr_buy_score, mr_sell_score = get_mean_reversion_score(
-                        h1_curr, h1_prev, cc, current_atr, sr_for_mr, cfg)
-
-                    # Tighter SL/TP for mean-reversion trades
-                    mr_sl = atr_points * cfg.MR_SL_ATR_MULTI
-                    mr_sl = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, mr_sl))
-                    mr_tp = atr_points * cfg.MR_TP_ATR_MULTI
-                    bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
-
-                    mr_min = cfg.MR_MIN_SCORE
-                    if current_dd >= 15.0:
-                        mr_min += 2
-                    elif current_dd >= 10.0:
-                        mr_min += 1
-
-                    if mr_buy_score >= mr_min and mr_buy_score > mr_sell_score:
-                        self._open_trade("BUY", cc, ct, mr_buy_score, current_dd,
-                                         mr_sl, mr_tp, current_atr,
-                                         lot_multiplier * cfg.MR_LOT_SCALE, component_mask,
-                                         entry_type="meanrev", entry_bar=i, bar_spread=bar_spread)
-                        entered = True
-                    elif mr_sell_score >= mr_min and mr_sell_score > mr_buy_score:
-                        self._open_trade("SELL", cc, ct, mr_sell_score, current_dd,
-                                         mr_sl, mr_tp, current_atr,
-                                         lot_multiplier * cfg.MR_LOT_SCALE, component_mask,
-                                         entry_type="meanrev", entry_bar=i, bar_spread=bar_spread)
-                        entered = True
 
             # v4.0: Reversal mode - only when no normal entry and no open positions
             if not entered and pos_count == 0:
