@@ -209,7 +209,7 @@ class GoldConfig:
     REGIME_SMOOTH_PERIOD = 5         # EMA smoothing for regime persistence (H4 bars)
 
     # TREND regime profile (ER >= 0.3, vol < 1.5)
-    TREND_MIN_SCORE = 8
+    TREND_MIN_SCORE = 9              # v9.0b: raised from 8 (too many low-quality trades)
     TREND_SL_ATR_MULTI = 1.5
     TREND_TP_ATR_MULTI = 4.0        # Wider TP to ride trends
     TREND_LOT_SCALE = 1.0
@@ -218,8 +218,8 @@ class GoldConfig:
     TREND_COOLDOWN_BARS = 12         # Shorter cooldown in trending
     TREND_SL_WIDEN = 1.3             # With-trend SL widen
     TREND_TP_EXTEND = 1.3            # With-trend TP extend (was 1.2)
-    # Component bonuses: H4 Trend(+1), Momentum Burst(+1), M15 Cross(+1)
-    TREND_COMPONENT_BONUS = {0: 1, 13: 1, 4: 1}
+    # Component bonuses: H4 Trend(+1), Momentum Burst(+1)
+    TREND_COMPONENT_BONUS = {0: 1, 13: 1}
 
     # RANGE regime profile (ER < 0.3, vol < 1.2)
     RANGE_MIN_SCORE = 10
@@ -241,15 +241,15 @@ class GoldConfig:
     RANGE_MR_RSI_OS_MILD = 30
     RANGE_MR_BB_PROXIMITY = 0.15     # BB position < this or > 1-this
     RANGE_MR_SL_ATR = 1.0            # Tight SL for MR
-    RANGE_MR_TP_ATR = 1.5            # TP = BB midline distance approx
-    RANGE_MR_LOT_SCALE = 0.5         # Half-sized for MR trades
-    RANGE_MR_MIN_SCORE = 2           # MR needs lower score (different criteria)
+    RANGE_MR_TP_ATR = 1.8            # v9.0b: raised from 1.5 (too tight)
+    RANGE_MR_LOT_SCALE = 0.4         # v9.0b: reduced from 0.5 (limit MR risk)
+    RANGE_MR_MIN_SCORE = 3           # v9.0b: raised from 2 (filter weak MR signals)
 
     # HIGH_VOL regime profile (vol >= 1.5, not crash)
     HIGHVOL_MIN_SCORE = 13
-    HIGHVOL_SL_ATR_MULTI = 2.5      # Widest SL to survive whipsaws
+    HIGHVOL_SL_ATR_MULTI = 2.0      # v9.0b: reduced from 2.5 (wide SL = big losses)
     HIGHVOL_TP_ATR_MULTI = 3.5
-    HIGHVOL_LOT_SCALE = 0.4          # Smallest lots
+    HIGHVOL_LOT_SCALE = 0.3          # v9.0b: reduced from 0.4 (further limit risk)
     HIGHVOL_ALLOW_PYRAMID = False
     HIGHVOL_SCORE_MARGIN = 3
     HIGHVOL_COOLDOWN_BARS = 24       # Longest cooldown
@@ -1493,8 +1493,8 @@ class GoldBacktester:
                     if current_regime in self.regime_trades:
                         self.regime_trades[current_regime].append(entry_type)
 
-            # v9.0: Mean-reversion entry for RANGE regime
-            if not entered and pos_count == 0 and cfg.USE_REGIME_ADAPTIVE and current_regime == 'range':
+            # v9.0: Mean-reversion entry for RANGE regime (only in low-vol range)
+            if not entered and pos_count == 0 and cfg.USE_REGIME_ADAPTIVE and current_regime == 'range' and vol_ratio < 1.0:
                 mr_dir, mr_score = self.check_mean_reversion_entry(
                     h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct)
                 if mr_dir is not None:
