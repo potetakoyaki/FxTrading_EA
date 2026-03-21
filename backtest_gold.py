@@ -158,13 +158,14 @@ class GoldConfig:
     PYRAMID_LOT_DECAY = 0.5
     USE_REVERSAL_MODE = True
 
-    # v7.1: Trend quality filter (weak trend = higher threshold)
+    # v7.1: Trend quality filter (weak trend = adaptive SL/TP)
     USE_TREND_QUALITY_FILTER = True
     WEAK_TREND_ADX = 25              # ADX below this = weak trend
-    WEAK_TREND_SLOPE_ATR = 0.5       # abs(slope)/ATR below this = no clear direction
-    WEAK_TREND_SCORE_BOOST = 3       # Extra MIN_SCORE in weak trend conditions
-    WEAK_TREND_TP_REDUCE = 0.7       # TP reduction in weak trend (take profit faster)
-    WEAK_TREND_COOLDOWN_MULTI = 2.0  # Cooldown multiplier after SL in weak trend
+    WEAK_TREND_SLOPE_ATR = 0.3       # abs(slope)/ATR below this = no clear direction
+    WEAK_TREND_SCORE_BOOST = 1       # Mild MIN_SCORE boost (don't kill trades)
+    WEAK_TREND_TP_REDUCE = 0.55      # Aggressive TP reduction (take profit much faster)
+    WEAK_TREND_SL_REDUCE = 0.85      # Tighter SL in weak trend (cut losses faster)
+    WEAK_TREND_COOLDOWN_MULTI = 1.5  # Mild cooldown extension after SL
 
     # v6.0 Professional
     # Transaction costs
@@ -1146,6 +1147,11 @@ class GoldBacktester:
                         # Counter-trend: tighter SL + tighter TP
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
                         adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
+
+                # v7.1: Weak trend SL/TP adaptation (tighter targets in choppy markets)
+                if weak_trend:
+                    adj_tp *= cfg.WEAK_TREND_TP_REDUCE
+                    adj_sl = max(adj_sl * cfg.WEAK_TREND_SL_REDUCE, cfg.MIN_SL_POINTS)
 
                 # v6.0: Score margin filter - require clear directional bias
                 score_margin = cfg.SCORE_MARGIN_MIN
