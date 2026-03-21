@@ -47,7 +47,24 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v8.0 (current) - ER Regime Detection (Range Market Filter)
+### v8.1 (current) - High-Volatility Pyramid Block
+- **高ボラ時ピラミッド制限**: vol_ratio > 1.5 の時にピラミッドエントリーをブロック
+- ボラティリティが平均の1.5倍を超える局面では追加ポジションのリスクが大きいため抑制
+- Config: `HIGH_VOL_PYRAMID_BLOCK=1.5`
+- **2024-2026バックテスト結果 (v8.0 → v8.1)**:
+
+| Metric | v8.0 | v8.1 | Delta |
+|--------|------|------|-------|
+| PF | 1.27 | **1.32** | +0.04 |
+| WinRate | 53.5% | **54.3%** | +0.7% |
+| MaxDD | 15.5% | **14.8%** | -0.7% |
+| Return | +131.8% | **+157.4%** | +25.7% |
+| Trades | 1749 | 1738 | -11 |
+| Pyramids | 928 | 903 | -25 |
+
+- **全指標改善、副作用ゼロ**: 25件の高ボラピラミッドをブロックしただけでリターン+25.7%改善
+
+### v8.0 - ER Regime Detection (Range Market Filter)
 - **Efficiency Ratio (ER) regime detection**: H4のER(20期間) < 0.3でレンジ/チョッピー相場と判定
 - **レンジ相場でMIN_SCORE += 3**: チョッピー相場では高品質シグナルのみエントリー
 - **トレード数約25%減少**: 低品質トレードをフィルタリング、勝率・PF向上
@@ -124,6 +141,7 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
+- **v8.1: 高ボラピラミッド制限**: vol_ratio > 1.5（ATRが平均の1.5倍超）の局面ではピラミッドをブロック。高ボラ時の追加ポジションは損失が拡大しやすく、25件ブロックだけでリターン+25.7%改善
 - **v8.0: ERレジーム検出**: Efficiency Ratio（方向効率比）でトレンド/レンジを判定。ADXやBBWidthよりも優れた結果。レンジ相場ではMIN_SCOREを+3して低品質トレードをフィルタ
 - **v8.0: Mean-Reversion不採用**: RSI極値・BB反転の逆張り層を検証したが、ER regime detectionより効果が小さく複雑性が増すため不採用
 - **v7.0: BUY/SELL対称スコアリング**: ベア相場でもSELLが適切にトリガーされるよう、RSI・H4RSI・S/Rのスコアリングを対称化

@@ -154,6 +154,7 @@ class GoldConfig:
     USE_VOLUME_CLIMAX = True
     MAX_PYRAMID_POSITIONS = 3
     PYRAMID_LOT_DECAY = 0.5
+    HIGH_VOL_PYRAMID_BLOCK = 1.5   # v8.1: block pyramids when vol_ratio > threshold
     USE_REVERSAL_MODE = True
 
     # v6.0 Professional
@@ -1121,15 +1122,19 @@ class GoldBacktester:
             pyramid_ok = True
 
             if is_pyramid:
+                # v8.1: Block pyramids during high-volatility regime
+                if cfg.HIGH_VOL_PYRAMID_BLOCK is not None and vol_ratio > cfg.HIGH_VOL_PYRAMID_BLOCK:
+                    pyramid_ok = False
                 # Check if existing positions are profitable
-                for pos in self.open_positions:
-                    if pos["direction"] == "BUY":
-                        unrealized = cc - pos["entry"]
-                    else:
-                        unrealized = pos["entry"] - cc
-                    if unrealized <= 0:
-                        pyramid_ok = False
-                        break
+                if pyramid_ok:
+                    for pos in self.open_positions:
+                        if pos["direction"] == "BUY":
+                            unrealized = cc - pos["entry"]
+                        else:
+                            unrealized = pos["entry"] - cc
+                        if unrealized <= 0:
+                            pyramid_ok = False
+                            break
 
             # ---- Entry ----
             entry_type = "normal"
