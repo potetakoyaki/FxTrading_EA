@@ -47,7 +47,20 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v5.2 (current) - Trend-aligned SL + CSV fallback
+### v6.0 (current) - Professional Grade
+- **Realistic transaction costs**: CSV実スプレッド + スリッページ(3pts) + コミッション($7/lot)
+- **Score margin filter**: buy/sell score差が2以上必要（曖昧シグナル排除）
+- **Time-decay SL tightening**: 12h以上含み損ポジションのSLを段階的に縮小
+- **ATR ratchet trailing**: 利益拡大に応じてトレール幅を自動縮小
+- **Walk-forward validation**: 6m train / 2m OOS / 2m step (9 fold, 78% pass)
+- **Monte Carlo simulation**: 1000回トレード順序シャッフル (100%利益確率、95%CI DD=20.4%)
+- **Parameter sensitivity analysis**: 主要パラメータの感度検証 (--sensitivity)
+- **Professional grade assessment**: 自動評価スコア (9/10 PROFESSIONAL GRADE)
+- Result: +155.4%, PF=1.30, WR=52.7%, DD=15.1%, 1739 trades
+- SL損失 v5.2: -101万→v6.0: -28万 (72%削減)
+- 月次WR: 64%→68%
+
+### v5.2 - Trend-aligned SL + CSV fallback
 - **H4 SMA(50) slope** (20-bar) でマクロトレンド方向を判定
 - **順トレンド**: SL x1.3 (プルバック耐性向上)
 - **逆トレンド**: SL x0.7 (素早い損切り)
