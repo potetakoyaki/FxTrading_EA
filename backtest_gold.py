@@ -1,5 +1,5 @@
 """
-AntigravityMTF EA Gold v6.0 -- Professional Backtester
+AntigravityMTF EA Gold v7.0 -- Symmetric Trend-Following Backtester
 ATR-based dynamic SL/TP, volatility regime, session bonus, momentum, partial close
 v3.0: USD Correlation, RSI Divergence, S/R Levels, Candle Patterns, H4 RSI,
       Chandelier Exit, Equity Curve Filter, Adaptive Sizing (Half-Kelly)
@@ -15,6 +15,12 @@ v6.0: Professional Grade
       - Adaptive time-decay SL tightening
       - Enhanced trailing stop (ATR ratchet)
       - Professional risk reporting (OOS metrics, robustness score)
+v7.0: Symmetric Trend-Following (Bull/Bear balanced)
+      - H1 RSI scoring: symmetric 30-40/60-70 ranges (was 35-40/60-65)
+      - H4 RSI alignment: symmetric H1 RSI filters (25/75 vs 30/70)
+      - S/R levels: removed counter-direction penalty (was +1/-1, now +1 only)
+      - Trend-aligned TP adjustment: extend TP with-trend, tighten counter-trend
+      - BUY/SELL directional breakdown in report
 """
 
 import pandas as pd
@@ -73,6 +79,8 @@ class GoldConfig:
     H4_SLOPE_PERIOD = 20          # SMA(50) slope lookback (H4 bars, ~3.5 days)
     TREND_SL_WIDEN = 1.3           # v5.2: SL widen multiplier for with-trend entries
     TREND_SL_TIGHTEN = 0.7         # v5.2: SL tighten multiplier for counter-trend entries
+    TREND_TP_EXTEND = 1.2          # v7.0: TP extend multiplier for with-trend entries
+    TREND_TP_TIGHTEN = 0.8         # v7.0: TP tighten multiplier for counter-trend entries
 
     H1_MA_FAST = 10
     H1_MA_SLOW = 30
@@ -455,15 +463,15 @@ def get_candle_pattern(h1_df, current_time):
 
 
 def get_h4_rsi_alignment(h4_rsi_val, h1_rsi_val):
-    """Check H4 RSI alignment with H1 RSI."""
+    """Check H4 RSI alignment with H1 RSI (symmetric for bull/bear)."""
     if pd.isna(h4_rsi_val) or pd.isna(h1_rsi_val):
         return 0
 
-    # H4 RSI 50-75 + H1 RSI < 70 -> bullish alignment
-    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 70:
+    # Bullish alignment: H4 RSI 50-75 + H1 RSI not overbought (< 75)
+    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 75:
         return 1
-    # H4 RSI 25-50 + H1 RSI > 30 -> bearish alignment
-    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 30:
+    # Bearish alignment: H4 RSI 25-50 + H1 RSI not oversold (> 25)
+    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 25:
         return -1
     return 0
 
@@ -899,17 +907,19 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[1] = -1
 
-            # 3. H1 RSI (1 pt) -- exclusive ranges
+            # 3. H1 RSI (1 pt) -- symmetric ranges for bull/bear
             if pd.notna(h1_curr["rsi"]):
                 rsi_val = h1_curr["rsi"]
                 if 40 < rsi_val < 60:
                     buy_score += 1
                     sell_score += 1
                     component_mask[2] = 1
-                elif 60 <= rsi_val < 65:
+                elif 60 <= rsi_val < 70:
+                    # Momentum zone: reward trend-following direction
                     buy_score += 1
                     component_mask[2] = 1
-                elif 35 < rsi_val <= 40:
+                elif 30 < rsi_val <= 40:
+                    # Momentum zone: reward trend-following direction
                     sell_score += 1
                     component_mask[2] = -1
 
@@ -988,16 +998,14 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[9] = -1
 
-            # 11. v3.0: S/R Level (+1/-1)
+            # 11. v3.0: S/R Level (+1, no penalty to opposite side)
             if cfg.USE_SR_LEVELS:
                 sr = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
                 if sr == 1:
                     buy_score += 1
-                    sell_score -= 1
                     component_mask[10] = 1
                 elif sr == -1:
                     sell_score += 1
-                    buy_score -= 1
                     component_mask[10] = -1
 
             # 12. v3.0: Candle Pattern (+1)
@@ -1091,18 +1099,22 @@ class GoldBacktester:
                     pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
                     entry_type = "pyramid"
 
-                # v5.2: Trend-aligned SL adjustment
-                # With macro trend: wider SL (survive pullbacks)
-                # Against macro trend: tighter SL (cut losses faster)
+                # v5.2/v7.0: Trend-aligned SL/TP adjustment
+                # With macro trend: wider SL (survive pullbacks) + wider TP (ride the trend)
+                # Against macro trend: tighter SL (cut losses faster) + tighter TP (grab quick profits)
                 adj_sl = dynamic_sl_points
                 adj_tp = adjusted_tp_points
                 if macro_trend_dir != 0:
                     if (buy_score > sell_score and macro_trend_dir == 1) or \
                        (sell_score > buy_score and macro_trend_dir == -1):
+                        # With-trend: wider SL + extended TP
                         adj_sl = min(dynamic_sl_points * cfg.TREND_SL_WIDEN, cfg.MAX_SL_POINTS)
+                        adj_tp = adjusted_tp_points * cfg.TREND_TP_EXTEND
                     elif (buy_score > sell_score and macro_trend_dir == -1) or \
                          (sell_score > buy_score and macro_trend_dir == 1):
+                        # Counter-trend: tighter SL + tighter TP
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
+                        adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
 
                 # v6.0: Score margin filter - require clear directional bias
                 score_margin = cfg.SCORE_MARGIN_MIN
@@ -1618,6 +1630,16 @@ class GoldBacktester:
                 max_consec_wins = max(max_consec_wins, current_streak)
                 max_consec_losses = min(max_consec_losses, current_streak)
 
+        # v7.0: Directional breakdown
+        buys = df[df["direction"] == "BUY"]
+        sells = df[df["direction"] == "SELL"]
+        buy_wins = buys[buys["pnl_pts"] > 0]
+        sell_wins = sells[sells["pnl_pts"] > 0]
+        buy_wr = len(buy_wins) / len(buys) * 100 if len(buys) > 0 else 0
+        sell_wr = len(sell_wins) / len(sells) * 100 if len(sells) > 0 else 0
+        buy_pnl = buys["pnl_jpy"].sum() if len(buys) > 0 else 0
+        sell_pnl = sells["pnl_jpy"].sum() if len(sells) > 0 else 0
+
         return {
             "Period": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
             "Initial Balance": f"{self.cfg.INITIAL_BALANCE:,.0f} JPY",
@@ -1626,6 +1648,8 @@ class GoldBacktester:
             "Return": f"{(self.balance / self.cfg.INITIAL_BALANCE - 1) * 100:+.1f}%",
             "Trades": len(df),
             "Win Rate": f"{win_rate:.1f}% ({len(wins)}W/{len(losses)}L)",
+            "BUY": f"{len(buys)}trades WR={buy_wr:.1f}% PnL={buy_pnl:+,.0f}JPY",
+            "SELL": f"{len(sells)}trades WR={sell_wr:.1f}% PnL={sell_pnl:+,.0f}JPY",
             "Avg Win": f"{avg_win_pts:.0f}pt ({avg_win_jpy:+,.0f} JPY)",
             "Avg Loss": f"{avg_loss_pts:.0f}pt ({avg_loss_jpy:,.0f} JPY)",
             "RR Ratio": f"1:{avg_win_pts/avg_loss_pts:.2f}" if avg_loss_pts > 0 else "N/A",
@@ -1945,7 +1969,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print(" AntigravityMTF EA [GOLD] v6.0 Professional Backtest")
+        print(" AntigravityMTF EA [GOLD] v7.0 Symmetric Trend-Following Backtest")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "Monthly":

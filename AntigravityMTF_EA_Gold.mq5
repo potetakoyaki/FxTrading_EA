@@ -130,6 +130,13 @@ input int    MaxPyramidPositions = 3;      // ピラミッディング上限
 input double PyramidLotDecay    = 0.5;     // ピラミッド追加ロット減衰率
 input bool   UseReversalMode    = true;    // リバーサルモード
 
+input group "=== v7.0 トレンドアライメントSL/TP ==="
+input int    H4_Slope_Period    = 20;      // H4 SMA(50) slope計算期間
+input double Trend_SL_Widen     = 1.3;     // 順トレンドSL倍率
+input double Trend_SL_Tighten   = 0.7;     // 逆トレンドSL倍率
+input double Trend_TP_Extend    = 1.2;     // 順トレンドTP倍率
+input double Trend_TP_Tighten   = 0.8;     // 逆トレンドTP倍率
+
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
 //+------------------------------------------------------------------+
@@ -385,8 +392,8 @@ void OnTick()
    // 3. H1 RSI（1点）
    double h1Rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(h1Rsi > 40 && h1Rsi < 60)         { buyScore += 1;  sellScore += 1;  buyReasons += "RSIn "; sellReasons += "RSIn "; componentMask |= (1 << 2); }
-   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += 1;  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
-   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += 1;  sellReasons += "RSIs "; componentMask |= (1 << 2); }
+   else if(h1Rsi >= 60 && h1Rsi < 70)   { buyScore += 1;  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
+   else if(h1Rsi > 30 && h1Rsi <= 40)   { sellScore += 1;  sellReasons += "RSIs "; componentMask |= (1 << 2); }
 
    // 4. H1 BB（1点）
    int bbSignal = GetBBSignal();
@@ -443,8 +450,8 @@ void OnTick()
    if(UseSRLevels)
    {
       int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), currentATR);
-      if(srSignal == 1)       { buyScore += 1;  sellScore -= 1; buyReasons  += "SR^ "; componentMask |= (1 << 10); }
-      else if(srSignal == -1) { sellScore += 1;  buyScore -= 1; sellReasons += "SRv "; componentMask |= (1 << 10); }
+      if(srSignal == 1)       { buyScore += 1;  buyReasons  += "SR^ "; componentMask |= (1 << 10); }
+      else if(srSignal == -1) { sellScore += 1;  sellReasons += "SRv "; componentMask |= (1 << 10); }
    }
 
    // 12. ローソク足パターン（1点）
@@ -491,6 +498,45 @@ void OnTick()
    // v4.0: モメンタムバースト時はTP×1.5
    if(MathAbs(burstScore) > 0)
       tpDist *= 1.5;
+
+   // v7.0: トレンドアライメントSL/TP調整
+   // H4 SMA(50) slope で順/逆トレンド判定
+   double h4Sma50_now  = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE) != INVALID_HANDLE ?
+                         GetIndicatorValue(iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE), 0, 1) : 0;
+   double h4Sma50_prev = h4Sma50_now;  // fallback
+   {
+      // slope判定: 現在SMA(50) vs H4_Slope_Period前のSMA(50)
+      double smaValues[];
+      int h4SmaHandle = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE);
+      if(h4SmaHandle != INVALID_HANDLE)
+      {
+         ArraySetAsSeries(smaValues, true);
+         if(CopyBuffer(h4SmaHandle, 0, 0, H4_Slope_Period + 1, smaValues) >= H4_Slope_Period + 1)
+         {
+            h4Sma50_now  = smaValues[0];
+            h4Sma50_prev = smaValues[H4_Slope_Period];
+         }
+         IndicatorRelease(h4SmaHandle);
+      }
+   }
+   double h4Slope = h4Sma50_now - h4Sma50_prev;
+   bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
+   bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
+   bool isWithTrend = isBuyWithTrend || isSellWithTrend;
+
+   if(h4Slope != 0)
+   {
+      if(isWithTrend)
+      {
+         slDist *= Trend_SL_Widen;    // 順トレンド: SL広め（プルバック耐性）
+         tpDist *= Trend_TP_Extend;   // 順トレンド: TP広め（利益伸ばし）
+      }
+      else
+      {
+         slDist *= Trend_SL_Tighten;  // 逆トレンド: SL狭め（素早い損切り）
+         tpDist *= Trend_TP_Tighten;  // 逆トレンド: TP狭め（早め利確）
+      }
+   }
 
    // SLの最小/最大制限（ポイント単位）
    double minSL = MinSL_Points * _Point;
@@ -1106,12 +1152,12 @@ int GetH4RSIAlignment()
 
    if(h4RsiVal == 0 || h1RsiVal == 0) return 0;
 
-   // H4 RSI 50-75 + H1 RSI < 70 → bullish
-   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 70)
+   // H4 RSI 50-75 + H1 RSI < 75 → bullish
+   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 75)
       return 1;
 
-   // H4 RSI 25-50 + H1 RSI > 30 → bearish
-   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 30)
+   // H4 RSI 25-50 + H1 RSI > 25 → bearish
+   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 25)
       return -1;
 
    return 0;

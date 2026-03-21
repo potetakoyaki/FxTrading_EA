@@ -47,7 +47,15 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v6.0 (current) - Professional Grade
+### v7.0 (current) - Symmetric Trend-Following (Bull/Bear balanced)
+- **H1 RSI symmetric scoring**: 60-70 (BUY) / 30-40 (SELL) に拡大 (旧: 60-65/35-40)
+- **H4 RSI alignment symmetric**: H1フィルタを<75/>25に対称化 (旧: <70/>30)
+- **S/R Level penalty撤廃**: 逆方向ペナルティ(-1)を削除、+1ボーナスのみ
+- **Trend-aligned TP adjustment**: 順トレンドTP x1.2拡大、逆トレンドTP x0.8縮小
+- **BUY/SELL directional breakdown**: レポートにBUY/SELL別勝率・損益を追加
+- Config: `TREND_TP_EXTEND=1.2`, `TREND_TP_TIGHTEN=0.8`
+
+### v6.0 - Professional Grade
 - **Realistic transaction costs**: CSV実スプレッド + スリッページ(3pts) + コミッション($7/lot)
 - **Score margin filter**: buy/sell score差が2以上必要（曖昧シグナル排除）
 - **Time-decay SL tightening**: 12h以上含み損ポジションのSLを段階的に縮小
@@ -84,7 +92,9 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
-- **スコアペナルティ方式は不採用**: カウンタートレンドへのスコア減点はフルバックテストを大幅に悪化させる (逆張りでも利益が出るケースが多いため)
+- **v7.0: BUY/SELL対称スコアリング**: ベア相場でもSELLが適切にトリガーされるよう、RSI・H4RSI・S/Rのスコアリングを対称化
+- **v7.0: S/Rペナルティ撤廃**: S/Rレベルで逆方向にペナルティを課すのを廃止（ベア相場でサポート付近のBUY偏重を防ぐ）
+- **v7.0: TP非対称調整**: SLだけでなくTPも順/逆トレンドで調整。順トレンドはTP拡大でトレンドに乗り、逆トレンドはTP縮小で素早く利確
 - **SL非対称調整を採用**: トレード自体はブロックせず、SL幅で順/逆トレンドを差別化
 - **ゴールドの特性**: 下落トレンドでも反発が強いため、BEAR期間のBUY比率が46%残るのは合理的
 - **2月問題**: 500ドル上昇中にSELL 12件 (-19K JPY) は既知。SLタイト化で-14Kに軽減済み
