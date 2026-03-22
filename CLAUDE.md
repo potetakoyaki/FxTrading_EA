@@ -47,7 +47,28 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v10.0 (current) - Intelligent Regime Engine
+### v10.1 (current) - HIGH_VOL Exit Fix + MSS Removal
+- **HIGH_VOL exit params をデフォルトに変更**: タイトすぎるexit（Partial 35%, BE 1.0x, Trail 0.6x, Ratchet 0.3）が早期決済→再エントリーの損失ループを引き起こしていた
+  - HIGHVOL_PARTIAL_TP_RATIO: 0.35 → 0.5
+  - HIGHVOL_BE_ATR_MULTI: 1.0 → 1.5
+  - HIGHVOL_TRAIL_ATR_MULTI: 0.6 → 1.0
+  - HIGHVOL_RATCHET_STEP: 0.3 → 0.5
+- **MSS v11.0b 完全削除**: 10エージェント議論で不採用決定。V-reversal/Vol acceleration/Trend exhaustion検出は2024-26 Return -11%、オーバーフィッティングリスク
+- **検証・不採用**: MSS（Market Structure Score）- 危険パターン検出フィルタ。5期間テストで一貫した改善なし
+- **5期間リグレッションテスト結果**:
+
+| 期間 | 市場環境 | Return | PF | WR | MaxDD | Sharpe | Trades |
+|------|----------|--------|------|------|-------|--------|--------|
+| 2016-18 | 低ボラ | +205.8% | 1.65 | 72.0% | 5.9% | 4.43 | 1,716 |
+| 2018-20 | トレンド | +516.1% | 1.93 | 75.9% | 5.4% | 5.80 | 1,624 |
+| 2020-22 | コロナ | +408.1% | 1.78 | 66.1% | 11.0% | 4.96 | 1,657 |
+| 2022-24 | レンジ | -5.5% | 0.97 | 48.4% | 13.5% | -0.41 | 1,315 |
+| 2024-26 | 高ボラ | +241.7% | 1.43 | 55.2% | 10.1% | 3.60 | 1,631 |
+
+- **v10.0 → v10.1 改善 (2024-26)**: Return +174%→+242%, PF 1.33→1.43, DD 10.8%→10.1%
+- **2020-22 DD大幅改善**: 17.2% → 11.0%（タイトHV exitが根本原因だった）
+
+### v10.0 - Intelligent Regime Engine
 - **Session-Regime Interaction**: セッション（Asian/London/NY）×レジーム（Trend/Range/HighVol）のマトリクスでロットスケール調整
   - London TREND: lot x1.1（トレンドフォロー最適セッション）
   - Asian TREND: lot x0.9（アジアはレンジ傾向）
@@ -195,6 +216,8 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
+- **v10.1: HIGH_VOL exit デフォルト化**: タイトなexit（BE 1.0x, Trail 0.6x）が高ボラ時に早期決済→同方向再エントリー→再度SLの損失ループを生んでいた。デフォルト（BE 1.5x, Trail 1.0x）で2020-22 DD 17.2%→11.0%
+- **v10.1不採用: MSS（Market Structure Score）**: V-reversal/Vol acceleration/Trend exhaustion検出。10エージェント議論（全員一致）で不採用。2024-26 Return -11%、閾値チューニングがオーバーフィッティング
 - **v10.0: A/Bテスト駆動開発**: 5機能を個別テスト→3機能採用、2機能不採用。データ駆動で判断
 - **v10.0不採用: Regime Blending**: レジーム間パラメータのEMA平均化。Trend TP=4.0とRange TP=2.0を混ぜると3.0になり、どちらでも最適でなくなる。PF 1.17に悪化
 - **v10.0不採用: Regime Memory**: レジーム別PFトラッキングでMIN_SCORE調整。トレード数半減でDDが+5%悪化。分散投資効果の喪失
