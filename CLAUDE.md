@@ -47,7 +47,30 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v10.1 (current) - HIGH_VOL Exit Fix + MSS Removal
+### v11.0 (current) - Range Market Guard
+- **Macro-ER構造的レンジ検出**: H4の60期間ERで長期的なレンジ構造を検出（短期ER=20期間では偽トレンド判定が多い）
+  - V11_MACRO_ER_PERIOD=60, V11_MACRO_ER_THRESHOLD=0.20
+- **トレンドコンポーネント減衰（range regime限定）**: レンジ判定時にMomentum Burst(3pt→1pt)とH4 Trend(3pt→1pt)をキャップ
+  - データ根拠: 2022-24でScore≥16のWR=37%（スコアが高いほど負ける逆転現象）
+  - Burst/H4Trendは「トレンドの存在」を検出するが、レンジでは偽シグナル
+- **スコア天井（range regime限定）**: max score=15で過信を防止
+- **Macro-rangeピラミッドブロック**: 長期ERが低い時はtrend判定でもピラミッド不可
+- Config: `USE_V11_RANGE=True`, `V11_BURST_CAP_IN_RANGE=1`, `V11_H4TREND_CAP_IN_RANGE=1`, `V11_RANGE_MAX_SCORE=15`
+- **敗因分析**: 2022-24のSL決済率86%（1231/1428）、TP到達率8.5%。トレンド用TP=4.0xがレンジで到達不能
+- **5期間A/Bテスト結果 (v10.1 → v11.0)**:
+
+| 期間 | 市場環境 | v10.1 PF | v11.0 PF | v10.1 DD | v11.0 DD | v10.1 Ret | v11.0 Ret | 判定 |
+|------|----------|---------|---------|---------|---------|----------|----------|------|
+| 2016-18 | 低ボラ | 1.57 | **1.71** | 5.4% | 5.7% | +129% | +156% | BETTER |
+| 2018-20 | トレンド | 1.71 | 1.62 | 7.3% | **5.6%** | +287% | +210% | WORSE(PF) |
+| 2020-22 | コロナ | 1.60 | **1.76** | 16.6% | **9.7%** | +448% | +478% | BETTER |
+| 2022-24 | レンジ | 1.23 | **1.28** | 14.6% | **11.8%** | +69% | +67% | BETTER |
+| 2024-26 | 高ボラ | 1.31 | 1.28 | 10.4% | **10.0%** | +179% | +135% | NEUTRAL |
+
+- **3/5 BETTER, 1 NEUTRAL, 1 WORSE。DD改善が顕著（2020-22: 16.6%→9.7%）**
+- **2018-20 PF低下はピラミッドブロックによるトレンド利益減少。DD -1.7%はトレードオフとして許容**
+
+### v10.1 - HIGH_VOL Exit Fix + MSS Removal
 - **HIGH_VOL exit params をデフォルトに変更**: タイトすぎるexit（Partial 35%, BE 1.0x, Trail 0.6x, Ratchet 0.3）が早期決済→再エントリーの損失ループを引き起こしていた
   - HIGHVOL_PARTIAL_TP_RATIO: 0.35 → 0.5
   - HIGHVOL_BE_ATR_MULTI: 1.0 → 1.5
@@ -216,6 +239,9 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
+- **v11.0: レンジ相場スコア逆転問題**: 2022-24分析でScore≥16のWR=37%（高スコアほど負ける）を発見。原因はMomentum Burst(3pt)+H4 Trend(3pt)がレンジで偽トレンドシグナルを発信。range regime限定でキャップ(3pt→1pt)
+- **v11.0: Macro ER vs Short ER**: ER(20)は短期変動で"trend"判定が揺れる。ER(60)で構造的レンジを捕捉し、ピラミッドのみブロック。スコア変更はregime限定（トレンド期間への副作用防止）
+- **v11.0: TP制限を不採用**: 初期テストではtrend regime時のTP=4.0→2.5を試したが、2018-20/2024-26のリターンが-77%/-112%大幅悪化。TP制限はトレンド利益を直接削るため却下
 - **v10.1: HIGH_VOL exit デフォルト化**: タイトなexit（BE 1.0x, Trail 0.6x）が高ボラ時に早期決済→同方向再エントリー→再度SLの損失ループを生んでいた。デフォルト（BE 1.5x, Trail 1.0x）で2020-22 DD 17.2%→11.0%
 - **v10.1不採用: MSS（Market Structure Score）**: V-reversal/Vol acceleration/Trend exhaustion検出。10エージェント議論（全員一致）で不採用。2024-26 Return -11%、閾値チューニングがオーバーフィッティング
 - **v10.0: A/Bテスト駆動開発**: 5機能を個別テスト→3機能採用、2機能不採用。データ駆動で判断
