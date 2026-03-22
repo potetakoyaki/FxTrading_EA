@@ -293,10 +293,10 @@ class GoldConfig:
     RANGE_TRAIL_ATR_MULTI = 0.8      # Tighter trailing
     RANGE_RATCHET_STEP = 0.4         # Faster ratchet
     # HIGH_VOL: protect capital (tighter)
-    HIGHVOL_PARTIAL_TP_RATIO = 0.35  # Early partial close
-    HIGHVOL_BE_ATR_MULTI = 1.0       # Fast breakeven
-    HIGHVOL_TRAIL_ATR_MULTI = 0.6    # Tight trailing
-    HIGHVOL_RATCHET_STEP = 0.3       # Fast ratchet
+    HIGHVOL_PARTIAL_TP_RATIO = 0.5   # Same as default (no early exit penalty)
+    HIGHVOL_BE_ATR_MULTI = 1.5       # Same as default (avoid premature BE)
+    HIGHVOL_TRAIL_ATR_MULTI = 1.0    # Same as default (wider trailing)
+    HIGHVOL_RATCHET_STEP = 0.5       # Same as default (slower ratchet)
 
     # 5. Regime Performance Memory (v10.0a: disabled, worsens DD +5%)
     USE_REGIME_MEMORY = False
@@ -316,25 +316,6 @@ class GoldConfig:
     CONSEC_LOSS_COOLDOWN_MULTI = 2.0
     CONSEC_LOSS_MAX_MULTI = 4.0
 
-    # v11.0: Market Structure Score (MSS) - defensive filter for dangerous patterns
-    USE_MSS = True
-    # V-Reversal detection: H4 momentum direction flip + large magnitude
-    MSS_V_REVERSAL_LOOKBACK = 4       # H4 bars for momentum calculation
-    MSS_V_REVERSAL_ATR_THRESHOLD = 2.5  # v11.0b: raised from 1.5 (too sensitive for gold)
-    MSS_V_REVERSAL_SCORE = 3           # MSS points for V-reversal
-    # Volatility acceleration: ATR expanding rapidly
-    MSS_VOL_ACCEL_LOOKBACK = 4        # H4 bars for ATR rate of change
-    MSS_VOL_ACCEL_THRESHOLD = 0.8     # v11.0b: raised from 0.5 (ATR grew 80%+ = vol accel)
-    MSS_VOL_ACCEL_SCORE = 2           # MSS points for vol acceleration
-    # Trend exhaustion: extended move without pullback
-    MSS_TREND_EXHAUST_BARS = 20       # H4 bars lookback for displacement
-    MSS_TREND_EXHAUST_ATR_THRESHOLD = 5.0  # v11.0b: raised from 4.0 (more selective)
-    MSS_TREND_EXHAUST_PULLBACK_PCT = 0.15  # v11.0b: tightened from 0.2
-    MSS_TREND_EXHAUST_SCORE = 2       # MSS points for trend exhaustion
-    # MSS action thresholds
-    MSS_BLOCK_THRESHOLD = 5           # MSS >= 5: skip entry
-    MSS_DEFENSIVE_THRESHOLD = 3       # MSS >= 3: lot 0.5x + MIN_SCORE+2
-    MSS_CAUTION_THRESHOLD = 2         # v11.0b: raised from 1 (MSS >= 2: lot 0.7x + MIN_SCORE+1)
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -786,11 +767,6 @@ class GoldBacktester:
         # 4. Adaptive exit: regime stored per position in pos dict
         # 5. Regime performance memory
         self.regime_trade_pnls = {'trend': [], 'range': [], 'high_vol': []}
-        # v11.0: Market Structure Score (MSS) tracking
-        self.mss_blocks = 0        # Entries blocked by MSS >= 5
-        self.mss_defensive = 0     # Entries with MSS >= 3 (lot reduced)
-        self.mss_caution = 0       # Entries with MSS >= 1 (slight reduction)
-        self.mss_pattern_counts = {'v_reversal': 0, 'vol_accel': 0, 'trend_exhaustion': 0}
 
     # ---- v4.0 Defense Methods ----
 
@@ -874,67 +850,6 @@ class GoldBacktester:
                 return 'high_vol'  # Mid-vol + low ER = treat as high vol
         return 'trend'
 
-    def calculate_mss(self, h4_df, h4_mask, current_atr, current_atr_avg):
-        """
-        v11.0: Market Structure Score (MSS) - detect dangerous market patterns.
-        Returns (mss_score, mss_components) where components is a dict of detected patterns.
-        """
-        cfg = self.cfg
-        mss = 0
-        components = {}
-
-        h4_available = h4_mask.sum()
-        min_bars = max(cfg.MSS_V_REVERSAL_LOOKBACK * 2, cfg.MSS_TREND_EXHAUST_BARS) + 2
-        if h4_available < min_bars:
-            return 0, components
-
-        h4_data = h4_df[h4_mask]
-
-        # 1. V-Reversal detection: momentum direction flip with large magnitude
-        lookback = cfg.MSS_V_REVERSAL_LOOKBACK
-        if h4_available >= lookback * 2 + 1:
-            h4_close = h4_data['Close'].values
-            momentum_curr = h4_close[-1] - h4_close[-1 - lookback]
-            momentum_prev = h4_close[-1 - lookback] - h4_close[-1 - lookback * 2]
-
-            h4_atr = h4_data['atr'].iloc[-1] if 'atr' in h4_data.columns else current_atr
-            if pd.notna(h4_atr) and h4_atr > 0:
-                atr_threshold = h4_atr * cfg.MSS_V_REVERSAL_ATR_THRESHOLD
-                if (momentum_curr > 0 and momentum_prev < 0 and abs(momentum_curr) > atr_threshold) or \
-                   (momentum_curr < 0 and momentum_prev > 0 and abs(momentum_curr) > atr_threshold):
-                    mss += cfg.MSS_V_REVERSAL_SCORE
-                    components['v_reversal'] = True
-
-        # 2. Volatility acceleration: ATR expanding rapidly (rate of change, not level)
-        vol_lookback = cfg.MSS_VOL_ACCEL_LOOKBACK
-        if h4_available >= vol_lookback + 1 and 'atr' in h4_data.columns:
-            atr_now = h4_data['atr'].iloc[-1]
-            atr_prev = h4_data['atr'].iloc[-1 - vol_lookback]
-            if pd.notna(atr_now) and pd.notna(atr_prev) and atr_prev > 0:
-                atr_roc = (atr_now - atr_prev) / atr_prev
-                if atr_roc > cfg.MSS_VOL_ACCEL_THRESHOLD:
-                    mss += cfg.MSS_VOL_ACCEL_SCORE
-                    components['vol_accel'] = round(atr_roc, 3)
-
-        # 3. Trend exhaustion: large directional displacement without pullback
-        exhaust_bars = cfg.MSS_TREND_EXHAUST_BARS
-        if h4_available >= exhaust_bars + 1:
-            h4_close = h4_data['Close'].values
-            h4_high = h4_data['High'].values
-            h4_low = h4_data['Low'].values
-
-            displacement = h4_close[-1] - h4_close[-1 - exhaust_bars]
-            h4_atr = h4_data['atr'].iloc[-1] if 'atr' in h4_data.columns else current_atr
-
-            if pd.notna(h4_atr) and h4_atr > 0 and abs(displacement) > h4_atr * cfg.MSS_TREND_EXHAUST_ATR_THRESHOLD:
-                total_range = max(h4_high[-exhaust_bars:]) - min(h4_low[-exhaust_bars:])
-                if total_range > 0:
-                    directional_ratio = abs(displacement) / total_range
-                    if directional_ratio > (1.0 - cfg.MSS_TREND_EXHAUST_PULLBACK_PCT):
-                        mss += cfg.MSS_TREND_EXHAUST_SCORE
-                        components['trend_exhaustion'] = round(abs(displacement) / h4_atr, 1)
-
-        return mss, components
 
     def get_regime_profile(self, regime):
         """Return regime-specific trading parameters."""
@@ -1448,21 +1363,6 @@ class GoldBacktester:
                     self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                     continue
 
-                # v11.0: Market Structure Score (MSS)
-                mss_score = 0
-                mss_components = {}
-                if cfg.USE_MSS:
-                    h4_mask_mss = h4_df.index <= ct
-                    mss_score, mss_components = self.calculate_mss(h4_df, h4_mask_mss, current_atr, current_atr_avg)
-                    # Track pattern occurrences
-                    for pat in mss_components:
-                        if pat in self.mss_pattern_counts:
-                            self.mss_pattern_counts[pat] += 1
-                    # MSS >= BLOCK: skip entry entirely
-                    if mss_score >= cfg.MSS_BLOCK_THRESHOLD:
-                        self.mss_blocks += 1
-                        self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                        continue
 
                 # v10.0: Update regime blend weights
                 self.update_regime_blend(current_regime)
@@ -1747,17 +1647,6 @@ class GoldBacktester:
                     if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
                         dynamic_min_score += cfg.REGIME_SCORE_BOOST
 
-            # v11.0: MSS-based MIN_SCORE boost and lot scaling
-            mss_lot_scale = 1.0
-            if cfg.USE_MSS and mss_score > 0:
-                if mss_score >= cfg.MSS_DEFENSIVE_THRESHOLD:
-                    dynamic_min_score += 2
-                    mss_lot_scale = 0.5
-                    self.mss_defensive += 1
-                elif mss_score >= cfg.MSS_CAUTION_THRESHOLD:
-                    dynamic_min_score += 1
-                    mss_lot_scale = 0.7
-                    self.mss_caution += 1
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -1859,7 +1748,7 @@ class GoldBacktester:
                 if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod * mss_lot_scale,
+                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
                                      component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
@@ -1869,7 +1758,7 @@ class GoldBacktester:
                 elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod * mss_lot_scale,
+                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
                                      component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
@@ -1890,7 +1779,7 @@ class GoldBacktester:
                     bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
                     self._open_trade(mr_dir, cc, ct, mr_score, current_dd,
                                      mr_sl, mr_tp, current_atr,
-                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE * session_lot_mod * mss_lot_scale,
+                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE * session_lot_mod,
                                      component_mask,
                                      entry_type="mean_reversion",
                                      entry_bar=i, bar_spread=bar_spread)
@@ -1905,12 +1794,12 @@ class GoldBacktester:
                 if reversal == 1:
                     self._open_trade("BUY", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod * mss_lot_scale, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
                 elif reversal == -1:
                     self._open_trade("SELL", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod * mss_lot_scale, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
@@ -2837,13 +2726,6 @@ if __name__ == "__main__":
                         et_pf = et_wins['pnl_jpy'].sum() / abs(subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum()) if subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum() != 0 else float('inf')
                         print(f"  {et:>16}: {len(subset):>4} trades | WR={et_wr:>5.1f}% | PF={et_pf:>5.2f} | PnL={et_pnl:>+10,.0f} JPY")
 
-        # v11.0: MSS Stats
-        if cfg.USE_MSS:
-            print(f"\n  --- v11.0 Market Structure Score (MSS) ---")
-            print(f"  MSS blocks (>=5):    {bt.mss_blocks}")
-            print(f"  MSS defensive (>=3): {bt.mss_defensive}")
-            print(f"  MSS caution (>=1):   {bt.mss_caution}")
-            print(f"  Pattern detections:  V-reversal={bt.mss_pattern_counts.get('v_reversal', 0)} | VolAccel={bt.mss_pattern_counts.get('vol_accel', 0)} | TrendExhaust={bt.mss_pattern_counts.get('trend_exhaustion', 0)}")
 
         # Last 10 trades
         print(f"\n  Trade Details (last 10):")
