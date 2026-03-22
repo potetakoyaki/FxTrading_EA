@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v4.0: プロ級防御+攻撃 (ニュース/クラッシュ/ピラミッド)    |
+//|            v12.0: Python v6-v11全機能同期                          |
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "4.00"
-#property description "XAUUSD専用 v4.0: v3.0全機能 + ニュースフィルター + 4状態レジーム + サーキットブレーカー + モメンタムバースト + ピラミッディング + リバーサルモード"
+#property version   "12.00"
+#property description "XAUUSD専用 v12.0: 2Dレジーム適応 + セッション×レジーム + 適応出口 + レンジガード + スコアマージン + ATRラチェット"
 
 #include <Trade/Trade.mqh>
 
@@ -143,6 +143,80 @@ input int    RegimeERPeriod     = 20;      // ER lookback period on H4
 input double RegimeERThreshold  = 0.3;     // ER below this = ranging
 input int    RegimeScoreBoost   = 3;       // Extra minScore in ranging
 
+input group "=== v6.0 プロフェッショナル ==="
+input int    ScoreMarginMin     = 2;       // buy/sellスコア差の最低要件
+input bool   UseTimeDecaySL     = true;    // 時間経過SLタイト化
+input int    TimeDecayStartBars = 48;      // 開始バー数 (48 M15 = 12h)
+input double TimeDecayRate      = 0.85;    // SL減衰率 (85%/12h)
+input bool   UseATRRatchetTrail = true;    // ATRラチェットトレーリング
+input double RatchetStepATR     = 0.5;     // ラチェットステップ (ATR倍率)
+input double SlippagePoints     = 3.0;     // スリッページ (ポイント)
+
+input group "=== v8.2 ピラミッドボラゲート ==="
+input double HighVolPyramidBlock = 1.2;    // この倍率以上でピラミッドブロック
+
+input group "=== v9.0 レジーム適応 ==="
+input bool   UseRegimeAdaptive  = true;    // レジーム適応戦略
+input double RegimeERTrend      = 0.3;     // ER >= this = trending
+input double RegimeVolHigh      = 1.5;     // vol_ratio >= this = high_vol
+input double RegimeVolCrash     = 3.0;     // vol_ratio >= this = crash
+input double RegimeVolRangeCap  = 1.2;     // vol <= this for pure range
+// TREND profile
+input double TrendSLMulti       = 1.5;
+input double TrendTPMulti       = 4.0;
+input double TrendLotScale      = 1.0;
+input int    TrendMinScore      = 9;
+input int    TrendScoreMargin   = 2;
+input int    TrendCooldownBars  = 12;
+// RANGE profile
+input double RangeSLMulti       = 1.1;
+input double RangeTPMulti       = 1.8;
+input double RangeLotScale      = 0.6;
+input int    RangeMinScore      = 10;
+input int    RangeScoreMargin   = 3;
+input int    RangeCooldownBars  = 22;
+// HIGH_VOL profile
+input double HighVolSLMulti     = 2.0;
+input double HighVolTPMulti     = 3.5;
+input double HighVolLotScale    = 0.3;
+input int    HighVolMinScore    = 13;
+input int    HighVolScoreMargin = 3;
+input int    HighVolCooldownBars = 24;
+
+input group "=== v10.0 セッション×レジーム ==="
+input bool   UseSessionRegime   = true;
+input double SessAsianTrendLot  = 0.9;
+input double SessAsianRangeLot  = 1.0;
+input double SessAsianHVLot     = 0.5;
+input double SessLondonTrendLot = 1.1;
+input double SessLondonRangeLot = 0.9;
+input double SessLondonHVLot    = 0.5;
+input double SessNYTrendLot     = 1.0;
+input double SessNYRangeLot     = 1.0;
+input double SessNYHVLot        = 0.4;
+
+input group "=== v10.0 レジーム別出口 ==="
+input bool   UseAdaptiveExit    = true;
+input double TrendPartialTP     = 0.55;
+input double TrendBEMulti       = 1.6;
+input double TrendTrailMulti    = 1.1;
+input double RangePartialTP     = 0.38;
+input double RangeBEMulti       = 1.15;
+input double RangeTrailMulti    = 0.75;
+input double HVPartialTP        = 0.5;
+input double HVBEMulti          = 1.5;
+input double HVTrailMulti       = 1.0;
+
+input group "=== v11.0 レンジマーケットガード ==="
+input bool   UseV11Range        = true;
+input int    MacroERPeriod      = 60;
+input double MacroERThreshold   = 0.20;
+input int    BurstCapInRange    = 1;
+input int    H4TrendCapInRange  = 1;
+input int    RangeMaxScore      = 15;
+input double MacroRangeTPMulti  = 2.5;
+input bool   MacroRangePyramid  = false;
+
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
 //+------------------------------------------------------------------+
@@ -169,6 +243,14 @@ int            tradeResultIndex;
 int            tradeResultCount;
 int            totalTradesTracked;
 bool           g_UseCorrelation;          // 実行時フラグ（シンボル不可時false）
+// v9.0 regime globals
+string         g_currentRegime;     // "trend", "range", "high_vol", "crash"
+double         g_volRatio;          // current ATR / avg ATR
+double         g_h4ER;              // H4 Efficiency Ratio (20-period)
+double         g_macroER;           // H4 Macro ER (60-period)
+bool           g_isMacroRange;      // macro ER < threshold
+// v10.0 session globals
+string         g_currentSession;    // "asian", "london", "ny"
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -272,7 +354,15 @@ int OnInit()
    g_circuitBreaker = false;
    g_pyramidCount = 0;
 
-   Print("AntigravityMTF EA [GOLD] v4.0 初期化完了");
+   // v9.0: レジーム初期化
+   g_currentRegime = "trend";
+   g_volRatio = 1.0;
+   g_h4ER = 0.5;
+   g_macroER = 0.5;
+   g_isMacroRange = false;
+   g_currentSession = "ny";
+
+   Print("AntigravityMTF EA [GOLD] v12.0 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
@@ -389,8 +479,8 @@ void OnTick()
 
    // 1. H4 トレンド（3点）
    int h4Trend = GetH4Trend();
-   if(h4Trend == 1)       { buyScore += 3;  buyReasons  += "H4^ "; componentMask |= (1 << 0); }
-   else if(h4Trend == -1) { sellScore += 3;  sellReasons += "H4v "; componentMask |= (1 << 0); }
+   if(h4Trend == 1)       { buyScore += 3;  buyReasons  += "H4^ "; componentMask |= (1 << 0); componentMask |= (1 << 15); } // bit15 = buy direction
+   else if(h4Trend == -1) { sellScore += 3;  sellReasons += "H4v "; componentMask |= (1 << 0); } // bit15 absent = sell direction
 
    // 2. H1 MA方向（2点）
    int h1MACross = GetH1MACross();
@@ -488,6 +578,36 @@ void OnTick()
    if(climaxScore > 0)       { buyScore += 2;  buyReasons  += "VCLX^ "; componentMask |= (1 << 13); }
    else if(climaxScore < 0)  { sellScore += 2;  sellReasons += "VCLXv "; componentMask |= (1 << 13); }
 
+   // v11.0: Dampen trend components in range
+   if(UseV11Range && (g_currentRegime == "range" || g_isMacroRange)) {
+      // Cap Momentum Burst
+      if(burstScore != 0) {
+         int burstPts = 3;
+         int reduction = burstPts - BurstCapInRange;
+         if(reduction > 0) {
+            if(burstScore > 0) buyScore -= reduction;
+            else sellScore -= reduction;
+         }
+      }
+      // Cap H4 Trend
+      if(componentMask & 1) { // H4 trend was scored
+         int h4Pts = 3;
+         int reduction2 = h4Pts - H4TrendCapInRange;
+         if(reduction2 > 0) {
+            if(componentMask & (1 << 15)) // direction bit = buy
+               buyScore -= reduction2;
+            else
+               sellScore -= reduction2;
+         }
+      }
+      buyScore = (int)MathMax(0, buyScore);
+      sellScore = (int)MathMax(0, sellScore);
+
+      // Score ceiling
+      buyScore = MathMin(buyScore, RangeMaxScore);
+      sellScore = MathMin(sellScore, RangeMaxScore);
+   }
+
    // Clamp scores to minimum 0
    buyScore = (int)MathMax(0, buyScore);
    sellScore = (int)MathMax(0, sellScore);
@@ -496,12 +616,39 @@ void OnTick()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // 動的SL/TP計算（ATRベース）
-   double slMulti = SL_ATR_Multi;
-   if(volRegime == 2) slMulti += HighVol_SL_Bonus;
+   // v9.0: Regime-specific SL/TP
+   double slMulti, tpMulti, regimeLotScale;
+   int regimeMinScore, regimeScoreMargin, regimeCooldown;
+   bool regimeAllowPyramid;
+
+   if(UseRegimeAdaptive) {
+      if(g_currentRegime == "trend") {
+         slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+         regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+         regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+         if(g_volRatio >= 1.2) slMulti += 0.3;
+      } else if(g_currentRegime == "range") {
+         slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
+         regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
+         regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
+      } else { // high_vol
+         slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HighVolLotScale;
+         regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
+         regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+      }
+   } else {
+      slMulti = SL_ATR_Multi;
+      tpMulti = TP_ATR_Multi;
+      regimeLotScale = 1.0;
+      regimeMinScore = MinEntryScore;
+      regimeScoreMargin = ScoreMarginMin;
+      regimeCooldown = (int)(CooldownMinutes / 15);
+      regimeAllowPyramid = true;
+      if(volRegime == 2) slMulti += HighVol_SL_Bonus;
+   }
 
    double slDist = currentATR * slMulti;
-   double tpDist = currentATR * TP_ATR_Multi;
+   double tpDist = currentATR * tpMulti;
 
    // v4.0: モメンタムバースト時はTP×1.5
    if(MathAbs(burstScore) > 0)
@@ -537,6 +684,30 @@ void OnTick()
          if(sumAbsChanges > 0)
             h4_er = netChange / sumAbsChanges;
       }
+   }
+
+   // v9.0: Store h4 ER globally and compute vol_ratio for regime detection
+   g_h4ER = h4_er;
+   double avgATR = GetAverageATR();
+   g_volRatio = (avgATR > 0) ? currentATR / avgATR : 1.0;
+
+   // v9.0: 2D Regime Classification
+   if(UseRegimeAdaptive) {
+      g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
+      if(g_currentRegime == "crash") return; // No trading in crash
+   } else {
+      g_currentRegime = "trend";
+   }
+
+   // v11.0: Macro ER
+   g_macroER = CalcMacroER();
+   g_isMacroRange = (UseV11Range && g_macroER < MacroERThreshold);
+
+   // v10.0: Session detection
+   {
+      MqlDateTime dtSess;
+      TimeCurrent(dtSess);
+      g_currentSession = GetCurrentSession(dtSess.hour);
    }
 
    bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
@@ -594,21 +765,48 @@ void OnTick()
       }
    }
 
-   // 動的スコア防壁（v4.0: 27点スケール）
-   int currentMinScore = MinEntryScore;  // default 9
-   if(currentDD >= 20.0)      currentMinScore = 18;
-   else if(currentDD >= 15.0) currentMinScore = 15;
-   else if(currentDD >= 10.0) currentMinScore = 12;
+   // 動的スコア防壁（v9.0: レジーム適応）
+   int currentMinScore = regimeMinScore;
+   if(currentDD >= 20.0) currentMinScore = (int)MathMax(currentMinScore, 18);
+   else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 15);
+   else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 12);
    // v4.0: Ranging regime → +3
    if(advRegime == 1) currentMinScore += 3;
 
-   // v8.0: ER regime filter
-   if(RegimeMethod == "er" && h4_er < RegimeERThreshold)
+   // Legacy ER boost (only when regime adaptive is off)
+   if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold)
       currentMinScore += RegimeScoreBoost;
+
+   // v6.0: Score Margin Filter
+   int scoreMargin = UseRegimeAdaptive ? regimeScoreMargin : ScoreMarginMin;
+
+   // Apply regime lot scale
+   lot = NormalizeDouble(lot * regimeLotScale, 2);
+   lot = MathMax(MinLots, lot);
+
+   // v10.0: Session-Regime lot modifier
+   double sessLotMod = GetSessionLotModifier(g_currentSession, g_currentRegime);
+   lot = NormalizeDouble(lot * sessLotMod, 2);
+   lot = MathMax(MinLots, lot);
+
+   // ATR spike cap
+   if(g_volRatio > 2.0) {
+      lot = MathMin(lot, MinLots * 3);
+   }
+
+   // v8.2: High-vol pyramid block
+   if(isPyramid && g_volRatio > HighVolPyramidBlock)
+      isPyramid = false;
+   // v11.0: Macro-range pyramid block
+   if(isPyramid && UseV11Range && g_isMacroRange && !MacroRangePyramid)
+      isPyramid = false;
+   // v9.0: Regime pyramid block
+   if(isPyramid && UseRegimeAdaptive && !regimeAllowPyramid)
+      isPyramid = false;
 
    bool entered = false;
 
-   if((!isPyramid || posCount > 0) && buyScore >= currentMinScore && buyScore > sellScore)
+   if((!isPyramid || posCount > 0) && buyScore >= currentMinScore && (buyScore - sellScore) >= scoreMargin)
    {
       if(!isPyramid || posCount < MaxPyramidPositions)
       {
@@ -616,9 +814,9 @@ void OnTick()
          double tp = NormalizeDouble(ask + tpDist, _Digits);
 
          if(trade.Buy(lot, _Symbol, ask, sl, tp,
-            StringFormat("GOLD BUY S:%d M:%d ATR:%.1f", buyScore, componentMask, currentATR/_Point)))
+            StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f", buyScore, componentMask, g_currentRegime, currentATR/_Point)))
          {
-            Print("GOLD BUY Score:", buyScore, "/27 ATR:", DoubleToString(currentATR/_Point,0),
+            Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                   "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                   isPyramid ? " [PYRAMID]" : "", " [", buyReasons, "]");
             entered = true;
@@ -626,7 +824,7 @@ void OnTick()
       }
    }
 
-   if(!entered && (!isPyramid || posCount > 0) && sellScore >= currentMinScore && sellScore > buyScore)
+   if(!entered && (!isPyramid || posCount > 0) && sellScore >= currentMinScore && (sellScore - buyScore) >= scoreMargin)
    {
       if(!isPyramid || posCount < MaxPyramidPositions)
       {
@@ -634,9 +832,9 @@ void OnTick()
          double tp = NormalizeDouble(bid - tpDist, _Digits);
 
          if(trade.Sell(lot, _Symbol, bid, sl, tp,
-            StringFormat("GOLD SELL S:%d M:%d ATR:%.1f", sellScore, componentMask, currentATR/_Point)))
+            StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f", sellScore, componentMask, g_currentRegime, currentATR/_Point)))
          {
-            Print("GOLD SELL Score:", sellScore, "/27 ATR:", DoubleToString(currentATR/_Point,0),
+            Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                   "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                   isPyramid ? " [PYRAMID]" : "", " [", sellReasons, "]");
             entered = true;
@@ -671,6 +869,81 @@ void OnTick()
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| v9.0: 2Dレジーム分類                                               |
+//+------------------------------------------------------------------+
+string DetectRegimeV9(double h4_er_val, double vol_ratio)
+{
+   if(vol_ratio >= RegimeVolCrash) return "crash";
+   if(vol_ratio >= RegimeVolHigh) return "high_vol";
+   if(h4_er_val < RegimeERTrend && vol_ratio <= RegimeVolRangeCap) return "range";
+   if(h4_er_val < RegimeERTrend) return "high_vol";
+   return "trend";
+}
+
+//+------------------------------------------------------------------+
+//| v10.0: セッション×レジーム ロット倍率                               |
+//+------------------------------------------------------------------+
+double GetSessionLotModifier(string session, string regime)
+{
+   if(!UseSessionRegime) return 1.0;
+   if(session == "asian") {
+      if(regime == "trend") return SessAsianTrendLot;
+      if(regime == "range") return SessAsianRangeLot;
+      return SessAsianHVLot;
+   }
+   if(session == "london") {
+      if(regime == "trend") return SessLondonTrendLot;
+      if(regime == "range") return SessLondonRangeLot;
+      return SessLondonHVLot;
+   }
+   // NY
+   if(regime == "trend") return SessNYTrendLot;
+   if(regime == "range") return SessNYRangeLot;
+   return SessNYHVLot;
+}
+
+//+------------------------------------------------------------------+
+//| v10.0: 現在セッション判定                                          |
+//+------------------------------------------------------------------+
+string GetCurrentSession(int hour)
+{
+   if(hour >= 0 && hour < 8) return "asian";
+   if(hour >= 8 && hour < 13) return "london";
+   return "ny";
+}
+
+//+------------------------------------------------------------------+
+//| v11.0: マクロER計算 (H4 60期間)                                    |
+//+------------------------------------------------------------------+
+double CalcMacroER()
+{
+   if(!UseV11Range) return 1.0;
+   double h4CloseArr[];
+   ArraySetAsSeries(h4CloseArr, true);
+   if(CopyClose(_Symbol, PERIOD_H4, 0, MacroERPeriod + 1, h4CloseArr) < MacroERPeriod + 1)
+      return 1.0;
+   double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[MacroERPeriod]);
+   double sumAbsChanges = 0;
+   for(int k = 0; k < MacroERPeriod; k++)
+      sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+   if(sumAbsChanges <= 0) return 0;
+   return netChange / sumAbsChanges;
+}
+
+//+------------------------------------------------------------------+
+//| v9.0: 平均ATR取得                                                  |
+//+------------------------------------------------------------------+
+double GetAverageATR()
+{
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(h_m15_atr, 0, 1, VolRegime_Period, atr) < VolRegime_Period) return 0;
+   double sum = 0;
+   for(int i = 0; i < VolRegime_Period; i++) sum += atr[i];
+   return sum / VolRegime_Period;
 }
 
 //+------------------------------------------------------------------+
@@ -1351,8 +1624,22 @@ void ManageOpenPositions()
       double volume    = PositionGetDouble(POSITION_VOLUME);
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
-      double beDist    = (curATR > 0) ? curATR * BE_ATR_Multi : MathAbs(tp - openPrice) * 0.4;
-      double trailStep = (curATR > 0) ? curATR * Trail_ATR_Multi : MathAbs(tp - openPrice) * 0.3;
+      // v10.0: Regime-adaptive exit parameters
+      double partialRatio, beMulti, trailMulti;
+      if(UseAdaptiveExit) {
+         if(g_currentRegime == "trend") {
+            partialRatio = TrendPartialTP; beMulti = TrendBEMulti; trailMulti = TrendTrailMulti;
+         } else if(g_currentRegime == "range") {
+            partialRatio = RangePartialTP; beMulti = RangeBEMulti; trailMulti = RangeTrailMulti;
+         } else {
+            partialRatio = HVPartialTP; beMulti = HVBEMulti; trailMulti = HVTrailMulti;
+         }
+      } else {
+         partialRatio = PartialTP_Ratio; beMulti = BE_ATR_Multi; trailMulti = Trail_ATR_Multi;
+      }
+
+      double beDist    = (curATR > 0) ? curATR * beMulti : MathAbs(tp - openPrice) * 0.4;
+      double trailStep = (curATR > 0) ? curATR * trailMulti : MathAbs(tp - openPrice) * 0.3;
 
       if(posType == POSITION_TYPE_BUY)
       {
@@ -1363,7 +1650,7 @@ void ManageOpenPositions()
          if(UsePartialClose && !IsPartialClosed(ticket) && tp > openPrice)
          {
             double tpDist = tp - openPrice;
-            if(profitDist >= tpDist * PartialTP_Ratio)
+            if(profitDist >= tpDist * partialRatio)
             {
                double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
                if(closeLot >= MinLots)
@@ -1373,7 +1660,7 @@ void ManageOpenPositions()
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
                      trade.PositionModify(ticket, newSL, tp);
-                     Print("GOLD 半利確 BUY: ", DoubleToString(closeLot, 2), "lot決済");
+                     Print("GOLD 半利確 BUY: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
             }
@@ -1407,6 +1694,33 @@ void ManageOpenPositions()
             if(chandelierSL > sl + 5 * _Point)
                trade.PositionModify(ticket, chandelierSL, tp);
          }
+
+         // v6.0: ATR Ratchet Trailing (BUY)
+         if(UseATRRatchetTrail && curATR > 0 && profitDist > 0) {
+            double atrMultiples = profitDist / curATR;
+            if(atrMultiples >= 2.0) {
+               double ratchetStep = curATR * MathMax(0.3, RatchetStepATR * (1.0 / atrMultiples * 2));
+               double ratchetSL = bid - ratchetStep;
+               ratchetSL = NormalizeDouble(ratchetSL, _Digits);
+               if(ratchetSL > sl + 5 * _Point)
+                  trade.PositionModify(ticket, ratchetSL, tp);
+            }
+         }
+
+         // v6.0: Time-decay SL tightening (BUY)
+         if(UseTimeDecaySL && sl < openPrice) {
+            double hoursOpen = (double)(TimeCurrent() - (datetime)PositionGetInteger(POSITION_TIME)) / 3600.0;
+            int barsOpen = (int)(hoursOpen * 4); // M15 bars
+            if(barsOpen >= TimeDecayStartBars) {
+               double decayPeriods = (double)(barsOpen - TimeDecayStartBars) / TimeDecayStartBars;
+               double decayFactor = MathPow(TimeDecayRate, decayPeriods);
+               double origSLDist = openPrice - sl;
+               double decayedSLDist = MathMax(MinSL_Points * _Point, origSLDist * decayFactor);
+               double newSL = NormalizeDouble(openPrice - decayedSLDist, _Digits);
+               if(newSL > sl)
+                  trade.PositionModify(ticket, newSL, tp);
+            }
+         }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
@@ -1417,7 +1731,7 @@ void ManageOpenPositions()
          if(UsePartialClose && !IsPartialClosed(ticket) && tp < openPrice)
          {
             double tpDist = openPrice - tp;
-            if(profitDist >= tpDist * PartialTP_Ratio)
+            if(profitDist >= tpDist * partialRatio)
             {
                double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
                if(closeLot >= MinLots)
@@ -1427,7 +1741,7 @@ void ManageOpenPositions()
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
                      trade.PositionModify(ticket, newSL, tp);
-                     Print("GOLD 半利確 SELL: ", DoubleToString(closeLot, 2), "lot決済");
+                     Print("GOLD 半利確 SELL: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
             }
@@ -1460,6 +1774,33 @@ void ManageOpenPositions()
             chandelierSL = NormalizeDouble(chandelierSL, _Digits);
             if(chandelierSL < sl - 5 * _Point)
                trade.PositionModify(ticket, chandelierSL, tp);
+         }
+
+         // v6.0: ATR Ratchet Trailing (SELL)
+         if(UseATRRatchetTrail && curATR > 0 && profitDist > 0) {
+            double atrMultiples = profitDist / curATR;
+            if(atrMultiples >= 2.0) {
+               double ratchetStep = curATR * MathMax(0.3, RatchetStepATR * (1.0 / atrMultiples * 2));
+               double ratchetSL = ask + ratchetStep;
+               ratchetSL = NormalizeDouble(ratchetSL, _Digits);
+               if(ratchetSL < sl - 5 * _Point)
+                  trade.PositionModify(ticket, ratchetSL, tp);
+            }
+         }
+
+         // v6.0: Time-decay SL tightening (SELL)
+         if(UseTimeDecaySL && sl > openPrice) {
+            double hoursOpen = (double)(TimeCurrent() - (datetime)PositionGetInteger(POSITION_TIME)) / 3600.0;
+            int barsOpen = (int)(hoursOpen * 4); // M15 bars
+            if(barsOpen >= TimeDecayStartBars) {
+               double decayPeriods = (double)(barsOpen - TimeDecayStartBars) / TimeDecayStartBars;
+               double decayFactor = MathPow(TimeDecayRate, decayPeriods);
+               double origSLDist = sl - openPrice;
+               double decayedSLDist = MathMax(MinSL_Points * _Point, origSLDist * decayFactor);
+               double newSL = NormalizeDouble(openPrice + decayedSLDist, _Digits);
+               if(newSL < sl)
+                  trade.PositionModify(ticket, newSL, tp);
+            }
          }
       }
    }
