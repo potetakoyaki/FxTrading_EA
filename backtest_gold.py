@@ -316,6 +316,26 @@ class GoldConfig:
     CONSEC_LOSS_COOLDOWN_MULTI = 2.0
     CONSEC_LOSS_MAX_MULTI = 4.0
 
+    # v11.0: Range Market Improvements
+    USE_V11_RANGE = True
+
+    # 1. Macro-Range ER: longer lookback (60 H4 bars ≈ 10 trading days)
+    #    Even when short-term ER says "trend", if macro ER is low → apply range guard
+    V11_MACRO_ER_PERIOD = 60
+    V11_MACRO_ER_THRESHOLD = 0.20    # Strict: only deep structural ranges
+
+    # 2. Trend-component dampening in range/macro-range:
+    #    Momentum Burst (3pt→1pt), H4 Trend (3pt→1pt) when macro ER < threshold
+    V11_BURST_CAP_IN_RANGE = 1       # Cap Momentum Burst points in range context
+    V11_H4TREND_CAP_IN_RANGE = 1     # Cap H4 Trend points in range context
+
+    # 3. High-score ceiling: cap max effective score (prevents score inversion)
+    V11_RANGE_MAX_SCORE = 15          # Score ceiling in range context
+
+    # 4. Macro-range TP tightening: even "trend" regime uses tighter TP
+    V11_MACRO_RANGE_TP_MULTI = 2.5    # TP multiplier when macro ER is low (vs 4.0)
+    V11_MACRO_RANGE_PYRAMID = False   # Block pyramids in macro-range
+
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -1263,6 +1283,9 @@ class GoldBacktester:
         if cfg.USE_V10_ENGINE:
             print(f"   v10.0: IntelligentRegime=ON Blend={cfg.USE_REGIME_BLENDING} CompEff={cfg.USE_COMPONENT_EFFECTIVENESS} SessionRegime={cfg.USE_SESSION_REGIME}")
             print(f"          AdaptiveExit={cfg.USE_ADAPTIVE_EXIT} RegimeMemory={cfg.USE_REGIME_MEMORY}")
+        if cfg.USE_V11_RANGE:
+            print(f"   v11.0: RangeGuard=ON MacroER={cfg.V11_MACRO_ER_PERIOD}/{cfg.V11_MACRO_ER_THRESHOLD}")
+            print(f"          BurstCap={cfg.V11_BURST_CAP_IN_RANGE} H4Cap={cfg.V11_H4TREND_CAP_IN_RANGE} MaxScore={cfg.V11_RANGE_MAX_SCORE} MacroTP={cfg.V11_MACRO_RANGE_TP_MULTI}")
 
 
         # v8.0: Pre-compute ER regime indicator on H4
@@ -1271,6 +1294,13 @@ class GoldBacktester:
             net_change = abs(h4_df['Close'] - h4_df['Close'].shift(er_period))
             sum_abs_changes = h4_df['Close'].diff().abs().rolling(window=er_period).sum()
             h4_df['efficiency_ratio'] = net_change / sum_abs_changes.replace(0, np.nan)
+
+        # v11.0: Pre-compute macro ER (longer lookback for structural range detection)
+        if cfg.USE_V11_RANGE:
+            macro_period = cfg.V11_MACRO_ER_PERIOD
+            macro_net = abs(h4_df['Close'] - h4_df['Close'].shift(macro_period))
+            macro_sum = h4_df['Close'].diff().abs().rolling(window=macro_period).sum()
+            h4_df['macro_er'] = macro_net / macro_sum.replace(0, np.nan)
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
@@ -1348,10 +1378,19 @@ class GoldBacktester:
 
             # v9.0: Regime-Adaptive Strategy
             h4_er_val = None
+            macro_er_val = None
             if cfg.REGIME_METHOD == 'er':
                 h4_mask_er = h4_df.index <= ct
                 if h4_mask_er.sum() > 0:
                     h4_er_val = h4_df[h4_mask_er].iloc[-1].get("efficiency_ratio")
+                    # v11.0: Macro ER for structural range detection
+                    if cfg.USE_V11_RANGE:
+                        macro_er_val = h4_df[h4_mask_er].iloc[-1].get("macro_er")
+
+            # v11.0: Determine if we're in a macro-range environment
+            is_macro_range = False
+            if cfg.USE_V11_RANGE and pd.notna(macro_er_val):
+                is_macro_range = macro_er_val < cfg.V11_MACRO_ER_THRESHOLD
 
             if cfg.USE_REGIME_ADAPTIVE:
                 current_regime = self.detect_regime_v9(h4_er_val, vol_ratio)
@@ -1593,6 +1632,37 @@ class GoldBacktester:
             buy_score = max(0, buy_score)
             sell_score = max(0, sell_score)
 
+            # v11.0: Dampen trend-following components in range regime only
+            # Problem: Momentum Burst(3pt) + H4 Trend(3pt) = 6pt boost → high score
+            # but in range markets, these signals cause score inversion (high score = lose)
+            # Note: Only apply to regime='range', NOT macro-range (to preserve trend profits)
+            if cfg.USE_V11_RANGE and current_regime == 'range':
+                # Cap Momentum Burst contribution
+                if component_mask[13] != 0:  # Momentum Burst was scored
+                    burst_pts = 3  # Original Momentum Burst points
+                    cap = cfg.V11_BURST_CAP_IN_RANGE
+                    reduction = burst_pts - cap
+                    if reduction > 0:
+                        if component_mask[13] == 1:
+                            buy_score -= reduction
+                        else:
+                            sell_score -= reduction
+
+                # Cap H4 Trend contribution
+                if component_mask[0] != 0:  # H4 Trend was scored
+                    h4_pts = 3  # Original H4 Trend points
+                    cap = cfg.V11_H4TREND_CAP_IN_RANGE
+                    reduction = h4_pts - cap
+                    if reduction > 0:
+                        if component_mask[0] == 1:
+                            buy_score -= reduction
+                        else:
+                            sell_score -= reduction
+
+                # Re-clamp after reduction
+                buy_score = max(0, buy_score)
+                sell_score = max(0, sell_score)
+
             # v10.0: Apply component effectiveness multipliers
             if cfg.USE_V10_ENGINE and cfg.USE_COMPONENT_EFFECTIVENESS:
                 # Re-weight scores based on component effectiveness
@@ -1655,6 +1725,13 @@ class GoldBacktester:
                 if np.mean(recent) < 0:
                     lot_multiplier = cfg.EQUITY_REDUCE_FACTOR
 
+            # v11.0: Score ceiling in range regime (prevents score inversion)
+            # Data shows Score>=16 has WR 37% in 2022-24: high score = false confidence
+            if cfg.USE_V11_RANGE and current_regime == 'range':
+                max_score = cfg.V11_RANGE_MAX_SCORE
+                buy_score = min(buy_score, max_score)
+                sell_score = min(sell_score, max_score)
+
             # v4.0: Momentum burst TP multiplier
             tp_multi = 1.5 if abs(burst) == 3 else 1.0
             adjusted_tp_points = dynamic_tp_points * tp_multi
@@ -1671,6 +1748,9 @@ class GoldBacktester:
 
             if is_pyramid:
                 if not allow_pyramid:
+                    pyramid_ok = False
+                # v11.0: Block pyramids in macro-range (even if regime=trend)
+                if pyramid_ok and cfg.USE_V11_RANGE and is_macro_range and not cfg.V11_MACRO_RANGE_PYRAMID:
                     pyramid_ok = False
                 # v8.1 legacy: Block pyramids during high-volatility (non-adaptive mode)
                 if pyramid_ok and not cfg.USE_REGIME_ADAPTIVE:
