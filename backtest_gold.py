@@ -293,10 +293,10 @@ class GoldConfig:
     RANGE_TRAIL_ATR_MULTI = 0.8      # Tighter trailing
     RANGE_RATCHET_STEP = 0.4         # Faster ratchet
     # HIGH_VOL: protect capital (tighter)
-    HIGHVOL_PARTIAL_TP_RATIO = 0.35  # Early partial close
-    HIGHVOL_BE_ATR_MULTI = 1.0       # Fast breakeven
-    HIGHVOL_TRAIL_ATR_MULTI = 0.6    # Tight trailing
-    HIGHVOL_RATCHET_STEP = 0.3       # Fast ratchet
+    HIGHVOL_PARTIAL_TP_RATIO = 0.5   # Same as default (no early exit penalty)
+    HIGHVOL_BE_ATR_MULTI = 1.5       # Same as default (avoid premature BE)
+    HIGHVOL_TRAIL_ATR_MULTI = 1.0    # Same as default (wider trailing)
+    HIGHVOL_RATCHET_STEP = 0.5       # Same as default (slower ratchet)
 
     # 5. Regime Performance Memory (v10.0a: disabled, worsens DD +5%)
     USE_REGIME_MEMORY = False
@@ -315,6 +315,7 @@ class GoldConfig:
     CONSEC_LOSS_THRESHOLD = 3
     CONSEC_LOSS_COOLDOWN_MULTI = 2.0
     CONSEC_LOSS_MAX_MULTI = 4.0
+
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -849,6 +850,7 @@ class GoldBacktester:
                 return 'high_vol'  # Mid-vol + low ER = treat as high vol
         return 'trend'
 
+
     def get_regime_profile(self, regime):
         """Return regime-specific trading parameters."""
         cfg = self.cfg
@@ -1361,6 +1363,7 @@ class GoldBacktester:
                     self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                     continue
 
+
                 # v10.0: Update regime blend weights
                 self.update_regime_blend(current_regime)
 
@@ -1644,6 +1647,7 @@ class GoldBacktester:
                     if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
                         dynamic_min_score += cfg.REGIME_SCORE_BOOST
 
+
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
             if cfg.USE_EQUITY_CURVE and len(self.recent_trade_pnls) >= cfg.EQUITY_MA_PERIOD:
@@ -1698,6 +1702,11 @@ class GoldBacktester:
                 session = self.get_session(hour)
                 session_lot_mod = self.get_session_lot_modifier(session, current_regime)
                 self.session_stats[session] = self.session_stats.get(session, 0) + 1
+
+            # v10.1: ATR spike lot cap - prevent large positions during extreme volatility
+            if vol_ratio > 2.0:
+                regime_lot_scale = min(regime_lot_scale, 0.3)
+                session_lot_mod = min(session_lot_mod, 0.3)
 
             if can_enter and (not is_pyramid or pyramid_ok):
                 pyramid_lot_multi = 1.0
@@ -2716,6 +2725,7 @@ if __name__ == "__main__":
                         et_pnl = subset['pnl_jpy'].sum()
                         et_pf = et_wins['pnl_jpy'].sum() / abs(subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum()) if subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum() != 0 else float('inf')
                         print(f"  {et:>16}: {len(subset):>4} trades | WR={et_wr:>5.1f}% | PF={et_pf:>5.2f} | PnL={et_pnl:>+10,.0f} JPY")
+
 
         # Last 10 trades
         print(f"\n  Trade Details (last 10):")
