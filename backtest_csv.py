@@ -225,6 +225,11 @@ def run_gold_backtest():
         print("  " + "-" * 110)
         for t in bt.trades[-10:]:
             print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>10.2f} {t['exit']:>10.2f} {t['lot']:>5.2f} {t['pnl_pts']:>8.0f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<10} {t.get('entry_type','normal'):<8}")
+
+        # v12.0: Statistical Significance Analysis
+        from backtest_gold import StatisticalSignificanceAnalyzer
+        ssa = StatisticalSignificanceAnalyzer(bt.trades, cfg.INITIAL_BALANCE)
+        ssa_results = ssa.run()
     else:
         print("[WARN] No trades occurred")
 

@@ -2655,6 +2655,305 @@ class MonteCarloSimulator:
 
 
 # ============================================================
+# v12.0: Statistical Significance Analyzer
+# ============================================================
+class StatisticalSignificanceAnalyzer:
+    """Bootstrap-based statistical significance testing for trading edge.
+
+    Provides:
+    - Bootstrap 95% CI for Profit Factor and Sharpe Ratio
+    - p-value for PF > 1.0 (null hypothesis: no edge)
+    - p-value for Sharpe > 0 (null hypothesis: random returns)
+    - Maximum Drawdown distribution from Monte Carlo
+    - Institutional-grade significance verdict
+    """
+
+    def __init__(self, trades, initial_balance=300_000, n_bootstrap=10000, n_mc=1000,
+                 confidence=0.95, seed=42):
+        self.trades = trades
+        self.initial_balance = initial_balance
+        self.n_bootstrap = n_bootstrap
+        self.n_mc = n_mc
+        self.confidence = confidence
+        self.rng = np.random.default_rng(seed)
+        self.results = {}
+
+    def _calc_pf(self, pnls):
+        """Calculate Profit Factor from PnL array."""
+        wins = pnls[pnls > 0].sum()
+        losses = abs(pnls[pnls <= 0].sum())
+        if losses == 0:
+            return float("inf") if wins > 0 else 1.0
+        return wins / losses
+
+    def _calc_sharpe(self, pnls):
+        """Calculate Sharpe ratio (annualized for M15 bars)."""
+        if len(pnls) < 2 or np.std(pnls) == 0:
+            return 0.0
+        return np.mean(pnls) / np.std(pnls) * np.sqrt(252 * 4)
+
+    def _bootstrap_ci(self, pnls, stat_func, null_center=None):
+        """Bootstrap confidence interval and p-value.
+
+        Args:
+            pnls: array of trade PnLs
+            stat_func: function to compute statistic
+            null_center: if set, compute p-value for stat > null_center
+        Returns:
+            (ci_low, ci_high, point_estimate, p_value)
+        """
+        n = len(pnls)
+        boot_stats = np.empty(self.n_bootstrap)
+
+        for i in range(self.n_bootstrap):
+            sample = self.rng.choice(pnls, size=n, replace=True)
+            boot_stats[i] = stat_func(sample)
+
+        # Filter out inf values for percentile calculation
+        finite_mask = np.isfinite(boot_stats)
+        finite_stats = boot_stats[finite_mask]
+
+        alpha = 1 - self.confidence
+        if len(finite_stats) > 0:
+            ci_low = np.percentile(finite_stats, alpha / 2 * 100)
+            ci_high = np.percentile(finite_stats, (1 - alpha / 2) * 100)
+        else:
+            ci_low = ci_high = float("inf")
+
+        point_est = stat_func(pnls)
+
+        p_value = None
+        if null_center is not None and len(finite_stats) > 0:
+            # One-sided p-value: proportion of bootstrap samples <= null_center
+            p_value = np.mean(boot_stats <= null_center)
+
+        return ci_low, ci_high, point_est, p_value
+
+    def _mc_drawdown_distribution(self, pnls):
+        """Monte Carlo drawdown distribution via trade-order shuffling."""
+        max_dds = np.empty(self.n_mc)
+
+        for i in range(self.n_mc):
+            shuffled = self.rng.permutation(pnls)
+            balance = self.initial_balance
+            peak = balance
+            max_dd_pct = 0.0
+
+            for pnl in shuffled:
+                balance += pnl
+                if balance > peak:
+                    peak = balance
+                if peak > 0:
+                    dd = (peak - balance) / peak * 100
+                    if dd > max_dd_pct:
+                        max_dd_pct = dd
+
+            max_dds[i] = max_dd_pct
+
+        return max_dds
+
+    @staticmethod
+    def _normal_cdf(x):
+        """Approximation of standard normal CDF (Abramowitz & Stegun)."""
+        import math
+        if x < -8:
+            return 0.0
+        if x > 8:
+            return 1.0
+        # Use error function if available
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def _t_test_mean_positive(self, pnls):
+        """One-sample t-test: H0: mean(PnL) <= 0, H1: mean(PnL) > 0.
+        Uses normal approximation for large n (valid for n > 30)."""
+        n = len(pnls)
+        if n < 2:
+            return 0.0, 1.0
+        mean = np.mean(pnls)
+        se = np.std(pnls, ddof=1) / np.sqrt(n)
+        if se == 0:
+            return mean, 0.0 if mean > 0 else 1.0
+        t_stat = mean / se
+        # For n > 30, t-distribution ≈ normal distribution
+        p_value = 1.0 - self._normal_cdf(t_stat)
+        return t_stat, p_value
+
+    @staticmethod
+    def _binomial_pvalue(k, n, p=0.5):
+        """One-sided binomial test p-value: P(X >= k) under H0: p=0.5.
+        Uses normal approximation for large n (valid for np > 5)."""
+        import math
+        mu = n * p
+        sigma = math.sqrt(n * p * (1 - p))
+        if sigma == 0:
+            return 0.0 if k > mu else 1.0
+        # Continuity-corrected z-score
+        z = (k - 0.5 - mu) / sigma
+        return 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    def run(self):
+        """Run full statistical significance analysis."""
+        if not self.trades:
+            print("  [WARN] No trades for statistical analysis")
+            return self.results
+
+        pnls = np.array([t["pnl_jpy"] for t in self.trades])
+        n_trades = len(pnls)
+
+        print(f"\n{'='*60}")
+        print(f" Statistical Significance Analysis")
+        print(f" ({n_trades} trades, {self.n_bootstrap:,} bootstrap, {self.n_mc:,} MC)")
+        print(f"{'='*60}")
+
+        # 1. Bootstrap CI for Profit Factor
+        pf_lo, pf_hi, pf_point, pf_pval = self._bootstrap_ci(
+            pnls, self._calc_pf, null_center=1.0
+        )
+        print(f"\n  [1] Profit Factor")
+        print(f"      Point estimate:  {pf_point:.3f}")
+        print(f"      95% CI:          [{pf_lo:.3f}, {pf_hi:.3f}]")
+        if pf_pval is not None:
+            sig = "***" if pf_pval < 0.001 else "**" if pf_pval < 0.01 else "*" if pf_pval < 0.05 else "n.s."
+            print(f"      p-value (PF>1):  {pf_pval:.4f} {sig}")
+            if pf_lo > 1.0:
+                print(f"      -> SIGNIFICANT: Entire 95% CI above 1.0 (trading edge confirmed)")
+            elif pf_pval < 0.05:
+                print(f"      -> SIGNIFICANT at 5% level (edge likely exists)")
+            else:
+                print(f"      -> NOT significant: Cannot reject null hypothesis of no edge")
+
+        # 2. Bootstrap CI for Sharpe Ratio
+        sharpe_lo, sharpe_hi, sharpe_point, sharpe_pval = self._bootstrap_ci(
+            pnls, self._calc_sharpe, null_center=0.0
+        )
+        print(f"\n  [2] Sharpe Ratio (annualized)")
+        print(f"      Point estimate:  {sharpe_point:.3f}")
+        print(f"      95% CI:          [{sharpe_lo:.3f}, {sharpe_hi:.3f}]")
+        if sharpe_pval is not None:
+            sig = "***" if sharpe_pval < 0.001 else "**" if sharpe_pval < 0.01 else "*" if sharpe_pval < 0.05 else "n.s."
+            print(f"      p-value (S>0):   {sharpe_pval:.4f} {sig}")
+            if sharpe_lo > 0:
+                print(f"      -> SIGNIFICANT: Entire 95% CI above 0 (risk-adjusted edge confirmed)")
+
+        # 3. t-test for mean PnL > 0
+        t_stat, t_pval = self._t_test_mean_positive(pnls)
+        mean_pnl = np.mean(pnls)
+        se_pnl = np.std(pnls, ddof=1) / np.sqrt(n_trades)
+        print(f"\n  [3] Mean Trade PnL (t-test)")
+        print(f"      Mean PnL:        {mean_pnl:+,.1f} JPY/trade")
+        print(f"      Std Error:       {se_pnl:,.1f} JPY")
+        print(f"      t-statistic:     {t_stat:.3f}")
+        sig = "***" if t_pval < 0.001 else "**" if t_pval < 0.01 else "*" if t_pval < 0.05 else "n.s."
+        print(f"      p-value (>0):    {t_pval:.6f} {sig}")
+        if t_pval < 0.01:
+            print(f"      -> HIGHLY SIGNIFICANT: Mean PnL is statistically positive")
+        elif t_pval < 0.05:
+            print(f"      -> SIGNIFICANT at 5% level")
+        else:
+            print(f"      -> NOT significant: Mean PnL not reliably positive")
+
+        # 4. Monte Carlo Drawdown Distribution
+        print(f"\n  [4] Maximum Drawdown Distribution (MC {self.n_mc:,} sims)")
+        mc_dds = self._mc_drawdown_distribution(pnls)
+        dd_median = np.median(mc_dds)
+        dd_p50 = np.percentile(mc_dds, 50)
+        dd_p75 = np.percentile(mc_dds, 75)
+        dd_p90 = np.percentile(mc_dds, 90)
+        dd_p95 = np.percentile(mc_dds, 95)
+        dd_p99 = np.percentile(mc_dds, 99)
+        dd_worst = np.max(mc_dds)
+        print(f"      50th percentile: {dd_p50:.1f}%")
+        print(f"      75th percentile: {dd_p75:.1f}%")
+        print(f"      90th percentile: {dd_p90:.1f}%")
+        print(f"      95th percentile: {dd_p95:.1f}%")
+        print(f"      99th percentile: {dd_p99:.1f}%")
+        print(f"      Worst case:      {dd_worst:.1f}%")
+        if dd_p99 < 30:
+            print(f"      -> LOW RISK: 99th percentile DD < 30%")
+        elif dd_p99 < 50:
+            print(f"      -> MODERATE RISK: 99th percentile DD < 50%")
+        else:
+            print(f"      -> HIGH RISK: 99th percentile DD >= 50%")
+
+        # 5. Win Rate significance (binomial test)
+        n_wins = sum(1 for t in self.trades if t["pnl_jpy"] > 0)
+        binom_pval = self._binomial_pvalue(n_wins, n_trades, 0.5)
+        wr = n_wins / n_trades * 100
+        print(f"\n  [5] Win Rate Significance (binomial test)")
+        print(f"      Win Rate:        {wr:.1f}% ({n_wins}/{n_trades})")
+        sig = "***" if binom_pval < 0.001 else "**" if binom_pval < 0.01 else "*" if binom_pval < 0.05 else "n.s."
+        print(f"      p-value (>50%):  {binom_pval:.6f} {sig}")
+        if binom_pval < 0.01:
+            print(f"      -> HIGHLY SIGNIFICANT: Win rate is not random")
+
+        # 6. Summary Verdict
+        print(f"\n  {'='*56}")
+        print(f"  STATISTICAL SIGNIFICANCE VERDICT")
+        print(f"  {'='*56}")
+
+        sig_score = 0
+        max_sig = 5
+        verdicts = []
+
+        if pf_pval is not None and pf_pval < 0.05:
+            sig_score += 1
+            verdicts.append("PF > 1.0")
+        if pf_lo > 1.0:
+            sig_score += 1
+            verdicts.append("PF 95%CI > 1.0")
+        if sharpe_pval is not None and sharpe_pval < 0.05:
+            sig_score += 1
+            verdicts.append("Sharpe > 0")
+        if t_pval < 0.05:
+            sig_score += 1
+            verdicts.append("Mean PnL > 0")
+        if dd_p99 < 30:
+            sig_score += 1
+            verdicts.append("DD99 < 30%")
+
+        for v in verdicts:
+            print(f"    [PASS] {v}")
+        for v_name in ["PF > 1.0", "PF 95%CI > 1.0", "Sharpe > 0", "Mean PnL > 0", "DD99 < 30%"]:
+            if v_name not in verdicts:
+                print(f"    [FAIL] {v_name}")
+
+        print(f"\n    Score: {sig_score}/{max_sig}")
+        if sig_score >= 5:
+            level = "INSTITUTIONAL GRADE - All significance tests passed"
+        elif sig_score >= 4:
+            level = "PROFESSIONAL GRADE - Strong statistical evidence"
+        elif sig_score >= 3:
+            level = "SEMI-PROFESSIONAL - Moderate statistical evidence"
+        else:
+            level = "INSUFFICIENT - Weak or no statistical evidence of edge"
+        print(f"    Verdict: {level}")
+
+        # Store results
+        self.results = {
+            "pf_point": pf_point,
+            "pf_ci_low": pf_lo,
+            "pf_ci_high": pf_hi,
+            "pf_pvalue": pf_pval,
+            "sharpe_point": sharpe_point,
+            "sharpe_ci_low": sharpe_lo,
+            "sharpe_ci_high": sharpe_hi,
+            "sharpe_pvalue": sharpe_pval,
+            "t_stat": t_stat,
+            "t_pvalue": t_pval,
+            "mean_pnl": mean_pnl,
+            "dd_percentiles": {
+                "p50": dd_p50, "p75": dd_p75, "p90": dd_p90,
+                "p95": dd_p95, "p99": dd_p99, "worst": dd_worst,
+            },
+            "win_rate_pvalue": binom_pval,
+            "sig_score": sig_score,
+            "sig_max": max_sig,
+        }
+
+        return self.results
+
+
+# ============================================================
 # v6.0: Parameter Sensitivity Analysis
 # ============================================================
 def run_sensitivity_analysis(h4_df, h1_df, m15_df, usdjpy_df=None):
@@ -2818,6 +3117,10 @@ if __name__ == "__main__":
         mc = MonteCarloSimulator(bt.trades, cfg.INITIAL_BALANCE, cfg.MC_SIMULATIONS, cfg.MC_CONFIDENCE)
         mc_results = mc.run()
 
+        # v12.0: Statistical Significance Analysis
+        ssa = StatisticalSignificanceAnalyzer(bt.trades, cfg.INITIAL_BALANCE)
+        ssa_results = ssa.run()
+
         # v6.0: Walk-Forward Validation
         wf = WalkForwardValidator(cfg)
         wf_results = wf.run(h4, h1, m15, usdjpy_df=usdjpy)
@@ -2898,8 +3201,28 @@ if __name__ == "__main__":
         else:
             print(f"  [FAIL] Trade count={trades_n} (< 300)")
 
+        # 6. Statistical Significance (v12.0)
+        max_score += 2
+        if ssa_results:
+            sig_s = ssa_results.get("sig_score", 0)
+            sig_m = ssa_results.get("sig_max", 5)
+            pf_pv = ssa_results.get("pf_pvalue")
+            sh_pv = ssa_results.get("sharpe_pvalue")
+            if sig_s >= 4:
+                score += 2
+                print(f"  [PASS] Statistical significance={sig_s}/{sig_m} (PF p={pf_pv:.4f}, Sharpe p={sh_pv:.4f})")
+            elif sig_s >= 3:
+                score += 1
+                print(f"  [WARN] Statistical significance={sig_s}/{sig_m} (moderate evidence)")
+            else:
+                print(f"  [FAIL] Statistical significance={sig_s}/{sig_m} (weak evidence)")
+        else:
+            print(f"  [SKIP] Statistical significance: not computed")
+
         print(f"\n  OVERALL SCORE: {score}/{max_score}")
-        if score >= max_score * 0.8:
+        if score >= max_score * 0.9:
+            print(f"  VERDICT: INSTITUTIONAL GRADE")
+        elif score >= max_score * 0.8:
             print(f"  VERDICT: PROFESSIONAL GRADE")
         elif score >= max_score * 0.6:
             print(f"  VERDICT: SEMI-PROFESSIONAL (improvements needed)")
