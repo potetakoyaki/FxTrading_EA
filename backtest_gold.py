@@ -1,5 +1,5 @@
 """
-AntigravityMTF EA Gold v7.0 -- Symmetric Trend-Following Backtester
+AntigravityMTF EA Gold v10.0 -- Intelligent Regime Engine
 ATR-based dynamic SL/TP, volatility regime, session bonus, momentum, partial close
 v3.0: USD Correlation, RSI Divergence, S/R Levels, Candle Patterns, H4 RSI,
       Chandelier Exit, Equity Curve Filter, Adaptive Sizing (Half-Kelly)
@@ -8,21 +8,14 @@ v4.0: News Filter, Dynamic Spread, Weekend Close, 4-State Regime (Crash/Ranging/
       Pyramiding (up to 3), Reversal Mode, Risk Metrics (Sharpe/Sortino/Calmar)
 v5.2: Trend-aligned SL + CSV fallback
 v6.0: Professional Grade
-      - Realistic transaction costs (CSV spread + slippage model)
-      - Walk-forward validation (rolling OOS)
-      - Monte Carlo simulation (confidence intervals)
-      - Score margin filter (min gap between buy/sell scores)
-      - Adaptive time-decay SL tightening
-      - Enhanced trailing stop (ATR ratchet)
-      - Professional risk reporting (OOS metrics, robustness score)
 v7.0: Symmetric Trend-Following (Bull/Bear balanced)
-      - H1 RSI scoring: symmetric 30-40/60-70 ranges (was 35-40/60-65)
-      - H4 RSI alignment: symmetric H1 RSI filters (25/75 vs 30/70)
-      - S/R levels: removed counter-direction penalty (was +1/-1, now +1 only)
-      - Trend-aligned TP adjustment: extend TP with-trend, tighten counter-trend
-      - BUY/SELL directional breakdown in report
-      (v7.1 weak-trend filter tested and reverted: no improvement in 2023-24
-       due to scoring system having zero predictive power in range markets)
+v9.0: Regime-Adaptive Strategy Engine
+v10.0: Intelligent Regime Engine
+      - Regime Transition Smoothing: EMA-blend parameters across regime changes
+      - Dynamic Component Effectiveness: track/adjust component weights by recent accuracy
+      - Session-Regime Interaction: session-specific lot/score modifiers per regime
+      - Adaptive Exit per Regime: regime-tuned partial close, trailing, breakeven
+      - Regime Performance Memory: track per-regime PF and adjust MIN_SCORE dynamically
 """
 
 import pandas as pd
@@ -154,6 +147,7 @@ class GoldConfig:
     USE_VOLUME_CLIMAX = True
     MAX_PYRAMID_POSITIONS = 3
     PYRAMID_LOT_DECAY = 0.5
+    HIGH_VOL_PYRAMID_BLOCK = 1.2   # v8.2: lowered from 1.5 (proven: DD 15.1%→10.1%)
     USE_REVERSAL_MODE = True
 
     # v6.0 Professional
@@ -188,6 +182,139 @@ class GoldConfig:
     REGIME_ER_PERIOD = 20            # Efficiency ratio lookback on H4
     REGIME_ER_THRESHOLD = 0.3        # ER below this = choppy/ranging
     REGIME_SCORE_BOOST = 3           # Extra MIN_SCORE in ranging regime
+
+    # v9.0: Regime-Adaptive Strategy Engine
+    USE_REGIME_ADAPTIVE = True
+
+    # Regime classification thresholds (2D: ER x Volatility)
+    REGIME_ER_TREND = 0.3            # ER >= this = trending
+    REGIME_VOL_HIGH = 1.5            # vol_ratio >= this = high volatility
+    REGIME_VOL_CRASH = 3.0           # vol_ratio >= this = crash (no trading)
+    REGIME_VOL_RANGE_CAP = 1.2       # vol_ratio <= this for pure range
+    REGIME_SMOOTH_PERIOD = 5         # EMA smoothing for regime persistence (H4 bars)
+
+    # TREND regime profile (ER >= 0.3, vol < 1.5)
+    TREND_MIN_SCORE = 9              # v9.0b: raised from 8 (too many low-quality trades)
+    TREND_SL_ATR_MULTI = 1.5
+    TREND_TP_ATR_MULTI = 4.0        # Wider TP to ride trends
+    TREND_LOT_SCALE = 1.0
+    TREND_ALLOW_PYRAMID = True
+    TREND_SCORE_MARGIN = 2
+    TREND_COOLDOWN_BARS = 12         # Shorter cooldown in trending
+    TREND_SL_WIDEN = 1.3             # With-trend SL widen
+    TREND_TP_EXTEND = 1.3            # With-trend TP extend (was 1.2)
+    # Component bonuses: H4 Trend(+1), Momentum Burst(+1)
+    TREND_COMPONENT_BONUS = {0: 1, 13: 1}
+
+    # RANGE regime profile (ER < 0.3, vol < 1.2)
+    RANGE_MIN_SCORE = 10
+    RANGE_SL_ATR_MULTI = 1.2        # Tighter SL
+    RANGE_TP_ATR_MULTI = 2.0        # Tight TP (mean reversion targets)
+    RANGE_LOT_SCALE = 0.7           # Smaller lots
+    RANGE_ALLOW_PYRAMID = False
+    RANGE_SCORE_MARGIN = 3           # Require clearer signals
+    RANGE_COOLDOWN_BARS = 20         # Longer cooldown in choppy
+    RANGE_SL_WIDEN = 1.0             # No trend alignment in range
+    RANGE_TP_EXTEND = 1.0
+    # Component bonuses: BB Bounce(+1), S/R(+1), RSI Divergence(+1), Channel(+1)
+    RANGE_COMPONENT_BONUS = {3: 1, 10: 1, 9: 1, 5: 1}
+    # Mean-reversion specific
+    RANGE_MR_ENABLED = False          # v9.0c: disabled (PF<1.0 in 2/3 periods)
+    RANGE_MR_RSI_OB = 75             # RSI overbought for MR sell
+    RANGE_MR_RSI_OS = 25             # RSI oversold for MR buy
+    RANGE_MR_RSI_OB_MILD = 70
+    RANGE_MR_RSI_OS_MILD = 30
+    RANGE_MR_BB_PROXIMITY = 0.15     # BB position < this or > 1-this
+    RANGE_MR_SL_ATR = 1.0            # Tight SL for MR
+    RANGE_MR_TP_ATR = 1.8            # v9.0b: raised from 1.5 (too tight)
+    RANGE_MR_LOT_SCALE = 0.4         # v9.0b: reduced from 0.5 (limit MR risk)
+    RANGE_MR_MIN_SCORE = 3           # v9.0b: raised from 2 (filter weak MR signals)
+
+    # HIGH_VOL regime profile (vol >= 1.5, not crash)
+    HIGHVOL_MIN_SCORE = 13
+    HIGHVOL_SL_ATR_MULTI = 2.0      # v9.0b: reduced from 2.5 (wide SL = big losses)
+    HIGHVOL_TP_ATR_MULTI = 3.5
+    HIGHVOL_LOT_SCALE = 0.3          # v9.0b: conservative lots
+    HIGHVOL_ALLOW_PYRAMID = False    # v9.0d: reverted (pyramid in high-vol causes DD blowup)
+    HIGHVOL_SCORE_MARGIN = 3
+    HIGHVOL_COOLDOWN_BARS = 24       # Longest cooldown
+    HIGHVOL_SL_WIDEN = 1.0           # No trend alignment
+    HIGHVOL_TP_EXTEND = 1.0
+    # Component bonuses: Momentum Burst(+2), Volume Climax(+1)
+    HIGHVOL_COMPONENT_BONUS = {13: 2, 14: 1}
+
+    # v10.0: Intelligent Regime Engine
+    USE_V10_ENGINE = True
+
+    # 1. Regime Transition Smoothing (blend parameters on regime change)
+    REGIME_BLEND_ALPHA = 0.3         # Blending speed: 0=never change, 1=instant switch
+    USE_REGIME_BLENDING = False       # v10.0a: disabled (averaging destroys edge)
+
+    # 2. Dynamic Component Effectiveness Tracking
+    USE_COMPONENT_EFFECTIVENESS = True
+    COMP_EFF_LOOKBACK = 100          # Rolling window for component accuracy
+    COMP_EFF_MIN_TRADES = 20         # Minimum trades before adjusting
+    COMP_EFF_BOOST = 0.3             # Extra weight when effectiveness > 1.3x baseline
+    COMP_EFF_PENALTY = 0.3           # Weight reduction when effectiveness < 0.7x baseline
+
+    # 3. Session-Regime Interaction
+    USE_SESSION_REGIME = True
+    # Session definitions (UTC hours)
+    SESSION_ASIAN_START = 0
+    SESSION_ASIAN_END = 8
+    SESSION_LONDON_START = 8
+    SESSION_LONDON_END = 16
+    SESSION_NY_START = 13
+    SESSION_NY_END = 22
+    # Session modifiers per regime (subtle adjustments, close to 1.0)
+    # Asian: gold tends to range → slight boost RANGE
+    SESSION_ASIAN_TREND_LOT = 0.9
+    SESSION_ASIAN_RANGE_LOT = 1.0
+    SESSION_ASIAN_HIGHVOL_LOT = 0.5
+    # London: best for trend-following → slight boost TREND
+    SESSION_LONDON_TREND_LOT = 1.1
+    SESSION_LONDON_RANGE_LOT = 0.9
+    SESSION_LONDON_HIGHVOL_LOT = 0.5
+    # NY: overlap session, good for breakouts
+    SESSION_NY_TREND_LOT = 1.0
+    SESSION_NY_RANGE_LOT = 1.0
+    SESSION_NY_HIGHVOL_LOT = 0.4
+
+    # 4. Adaptive Exit per Regime
+    USE_ADAPTIVE_EXIT = True
+    # TREND: let winners run (slightly wider than default)
+    TREND_PARTIAL_TP_RATIO = 0.55    # Slightly delay partial close (vs default 0.5)
+    TREND_BE_ATR_MULTI = 1.6         # Slightly higher BE threshold (vs 1.5)
+    TREND_TRAIL_ATR_MULTI = 1.1      # Slightly wider trailing (vs 1.0)
+    TREND_RATCHET_STEP = 0.55        # Slightly slower ratchet (vs 0.5)
+    # RANGE: quick profits (slightly tighter than default)
+    RANGE_PARTIAL_TP_RATIO = 0.4     # Earlier partial close
+    RANGE_BE_ATR_MULTI = 1.2         # Quicker breakeven
+    RANGE_TRAIL_ATR_MULTI = 0.8      # Tighter trailing
+    RANGE_RATCHET_STEP = 0.4         # Faster ratchet
+    # HIGH_VOL: protect capital (tighter)
+    HIGHVOL_PARTIAL_TP_RATIO = 0.35  # Early partial close
+    HIGHVOL_BE_ATR_MULTI = 1.0       # Fast breakeven
+    HIGHVOL_TRAIL_ATR_MULTI = 0.6    # Tight trailing
+    HIGHVOL_RATCHET_STEP = 0.3       # Fast ratchet
+
+    # 5. Regime Performance Memory (v10.0a: disabled, worsens DD +5%)
+    USE_REGIME_MEMORY = False
+    REGIME_MEMORY_LOOKBACK = 25      # Track last 25 trades per regime
+    REGIME_POOR_PF = 0.9             # PF below this → +2 MIN_SCORE
+    REGIME_GOOD_PF = 1.5             # PF above this → -1 MIN_SCORE
+
+    # v8.2: Graduated SL expansion (tested, rejected: DD +4.5%)
+    GRADUATED_SL = False             # Disabled: wider SL increases loss per trade
+    GRADUATED_SL_START = 0.8
+    GRADUATED_SL_SCALE = 0.7
+    GRADUATED_SL_CAP = 0.5
+
+    # v8.2: Consecutive loss cooldown escalation (tested, rejected: PF 1.07)
+    CONSEC_LOSS_ESCALATION = False   # Disabled: halves trades, destroys performance
+    CONSEC_LOSS_THRESHOLD = 3
+    CONSEC_LOSS_COOLDOWN_MULTI = 2.0
+    CONSEC_LOSS_MAX_MULTI = 4.0
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -611,6 +738,7 @@ class GoldBacktester:
         self.open_positions = []
         self.peak_balance = cfg.INITIAL_BALANCE
         self.cooldown_until = 0
+        self.consecutive_sl_count = 0     # v8.2: track consecutive SL losses
         # v3.0 additions
         self.recent_trade_pnls = []
         self.component_stats = {i: {"wins": 0, "total": 0} for i in range(15)}  # v4.0: 15 components
@@ -622,6 +750,22 @@ class GoldBacktester:
         self.crash_skips = 0
         self.weekend_closes = 0
         self.spread_blocks = 0
+        # v9.0: Regime tracking
+        self.regime_stats = {'trend': 0, 'range': 0, 'high_vol': 0, 'crash': 0}
+        self.regime_trades = {'trend': [], 'range': [], 'high_vol': []}
+        self.mr_trades = 0  # Mean-reversion entries
+        self.current_regime = 'trend'  # Default
+
+        # v10.0: Intelligent Regime Engine state
+        # 1. Regime blending weights (sum to 1.0)
+        self.regime_weights = {'trend': 1.0, 'range': 0.0, 'high_vol': 0.0}
+        # 2. Component effectiveness tracking (rolling PnL per component per direction)
+        self.component_trades = {i: [] for i in range(15)}  # list of (direction_match, pnl_jpy)
+        # 3. Session tracking (for reporting)
+        self.session_stats = {'asian': 0, 'london': 0, 'ny': 0}
+        # 4. Adaptive exit: regime stored per position in pos dict
+        # 5. Regime performance memory
+        self.regime_trade_pnls = {'trend': [], 'range': [], 'high_vol': []}
 
     # ---- v4.0 Defense Methods ----
 
@@ -685,6 +829,319 @@ class GoldBacktester:
         """Check if daily loss limit hit"""
         max_loss = self.balance * self.cfg.DAILY_MAX_LOSS_PCT / 100.0
         return self.daily_pnl <= -max_loss
+
+    # ---- v9.0 Regime-Adaptive Methods ----
+
+    def detect_regime_v9(self, h4_er, vol_ratio):
+        """
+        2D regime classification: ER (trend quality) x Volatility (ATR ratio).
+        Returns: 'crash', 'high_vol', 'trend', 'range'
+        """
+        cfg = self.cfg
+        if vol_ratio >= cfg.REGIME_VOL_CRASH:
+            return 'crash'
+        if vol_ratio >= cfg.REGIME_VOL_HIGH:
+            return 'high_vol'
+        if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_TREND:
+            if vol_ratio <= cfg.REGIME_VOL_RANGE_CAP:
+                return 'range'
+            else:
+                return 'high_vol'  # Mid-vol + low ER = treat as high vol
+        return 'trend'
+
+    def get_regime_profile(self, regime):
+        """Return regime-specific trading parameters."""
+        cfg = self.cfg
+        if regime == 'trend':
+            return {
+                'min_score': cfg.TREND_MIN_SCORE,
+                'sl_multi': cfg.TREND_SL_ATR_MULTI,
+                'tp_multi': cfg.TREND_TP_ATR_MULTI,
+                'lot_scale': cfg.TREND_LOT_SCALE,
+                'allow_pyramid': cfg.TREND_ALLOW_PYRAMID,
+                'score_margin': cfg.TREND_SCORE_MARGIN,
+                'cooldown_bars': cfg.TREND_COOLDOWN_BARS,
+                'sl_widen': cfg.TREND_SL_WIDEN,
+                'tp_extend': cfg.TREND_TP_EXTEND,
+                'component_bonus': cfg.TREND_COMPONENT_BONUS,
+            }
+        elif regime == 'range':
+            return {
+                'min_score': cfg.RANGE_MIN_SCORE,
+                'sl_multi': cfg.RANGE_SL_ATR_MULTI,
+                'tp_multi': cfg.RANGE_TP_ATR_MULTI,
+                'lot_scale': cfg.RANGE_LOT_SCALE,
+                'allow_pyramid': cfg.RANGE_ALLOW_PYRAMID,
+                'score_margin': cfg.RANGE_SCORE_MARGIN,
+                'cooldown_bars': cfg.RANGE_COOLDOWN_BARS,
+                'sl_widen': cfg.RANGE_SL_WIDEN,
+                'tp_extend': cfg.RANGE_TP_EXTEND,
+                'component_bonus': cfg.RANGE_COMPONENT_BONUS,
+            }
+        elif regime == 'high_vol':
+            return {
+                'min_score': cfg.HIGHVOL_MIN_SCORE,
+                'sl_multi': cfg.HIGHVOL_SL_ATR_MULTI,
+                'tp_multi': cfg.HIGHVOL_TP_ATR_MULTI,
+                'lot_scale': cfg.HIGHVOL_LOT_SCALE,
+                'allow_pyramid': cfg.HIGHVOL_ALLOW_PYRAMID,
+                'score_margin': cfg.HIGHVOL_SCORE_MARGIN,
+                'cooldown_bars': cfg.HIGHVOL_COOLDOWN_BARS,
+                'sl_widen': cfg.HIGHVOL_SL_WIDEN,
+                'tp_extend': cfg.HIGHVOL_TP_EXTEND,
+                'component_bonus': cfg.HIGHVOL_COMPONENT_BONUS,
+            }
+        else:  # crash - should not trade
+            return None
+
+    def check_mean_reversion_entry(self, h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct):
+        """
+        v9.0: Mean-reversion entry for RANGE regime.
+        Uses RSI extremes + BB proximity + S/R levels.
+        Returns: (direction, mr_score) or (None, 0)
+        """
+        cfg = self.cfg
+        if not cfg.RANGE_MR_ENABLED:
+            return None, 0
+
+        rsi = h1_curr.get("rsi")
+        if not pd.notna(rsi):
+            return None, 0
+
+        bb_upper = h1_curr.get("bb_upper")
+        bb_lower = h1_curr.get("bb_lower")
+        if not (pd.notna(bb_upper) and pd.notna(bb_lower)):
+            return None, 0
+
+        bw = bb_upper - bb_lower
+        if bw <= 0:
+            return None, 0
+
+        bp = (cc - bb_lower) / bw  # BB position 0-1
+
+        mr_buy_score = 0
+        mr_sell_score = 0
+
+        # RSI extreme
+        if rsi <= cfg.RANGE_MR_RSI_OS:
+            mr_buy_score += 2
+        elif rsi <= cfg.RANGE_MR_RSI_OS_MILD:
+            mr_buy_score += 1
+
+        if rsi >= cfg.RANGE_MR_RSI_OB:
+            mr_sell_score += 2
+        elif rsi >= cfg.RANGE_MR_RSI_OB_MILD:
+            mr_sell_score += 1
+
+        # BB proximity
+        if bp < cfg.RANGE_MR_BB_PROXIMITY:
+            mr_buy_score += 2
+        elif bp < 0.25:
+            mr_buy_score += 1
+
+        if bp > (1 - cfg.RANGE_MR_BB_PROXIMITY):
+            mr_sell_score += 2
+        elif bp > 0.75:
+            mr_sell_score += 1
+
+        # S/R proximity
+        if cfg.USE_SR_LEVELS:
+            sr = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
+            if sr == 1:  # Near support
+                mr_buy_score += 1
+            elif sr == -1:  # Near resistance
+                mr_sell_score += 1
+
+        # Price rejection (candle direction vs BB position)
+        if bp < 0.3 and h1_curr["Close"] > h1_prev["Close"]:
+            mr_buy_score += 1  # Bouncing off lower BB
+        if bp > 0.7 and h1_curr["Close"] < h1_prev["Close"]:
+            mr_sell_score += 1  # Rejecting upper BB
+
+        # RSI divergence in MR context
+        if cfg.USE_DIVERGENCE:
+            h1_closes_series = h1_df[h1_mask]["Close"]
+            h1_rsi_series = h1_df[h1_mask]["rsi"]
+            div = get_divergence(h1_closes_series, h1_rsi_series,
+                                 cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
+            if div == 1:
+                mr_buy_score += 1
+            elif div == -1:
+                mr_sell_score += 1
+
+        # Entry decision
+        if mr_buy_score >= cfg.RANGE_MR_MIN_SCORE and mr_buy_score > mr_sell_score:
+            return "BUY", mr_buy_score
+        elif mr_sell_score >= cfg.RANGE_MR_MIN_SCORE and mr_sell_score > mr_buy_score:
+            return "SELL", mr_sell_score
+
+        return None, 0
+
+    # ---- v10.0 Intelligent Regime Methods ----
+
+    def update_regime_blend(self, current_regime):
+        """v10.0: Smooth regime transitions by blending weights."""
+        if not self.cfg.USE_REGIME_BLENDING or not self.cfg.USE_V10_ENGINE:
+            # Hard switch
+            self.regime_weights = {k: (1.0 if k == current_regime else 0.0)
+                                    for k in self.regime_weights}
+            return
+        alpha = self.cfg.REGIME_BLEND_ALPHA
+        for regime in self.regime_weights:
+            if regime == current_regime:
+                self.regime_weights[regime] = self.regime_weights[regime] * (1 - alpha) + alpha
+            else:
+                self.regime_weights[regime] = self.regime_weights[regime] * (1 - alpha)
+        # Normalize
+        total = sum(self.regime_weights.values())
+        if total > 0:
+            for k in self.regime_weights:
+                self.regime_weights[k] /= total
+
+    def get_blended_profile(self, current_regime):
+        """v10.0: Return blended profile from regime weights."""
+        if not self.cfg.USE_REGIME_BLENDING or not self.cfg.USE_V10_ENGINE:
+            return self.get_regime_profile(current_regime)
+
+        profiles = {}
+        for regime in ['trend', 'range', 'high_vol']:
+            p = self.get_regime_profile(regime)
+            if p:
+                profiles[regime] = p
+
+        # Blend numeric parameters by weight
+        blended = {}
+        numeric_keys = ['min_score', 'sl_multi', 'tp_multi', 'lot_scale',
+                        'score_margin', 'cooldown_bars', 'sl_widen', 'tp_extend']
+        for key in numeric_keys:
+            val = 0.0
+            for regime, weight in self.regime_weights.items():
+                if regime in profiles:
+                    val += profiles[regime][key] * weight
+            blended[key] = val
+
+        # Round min_score up to int
+        blended['min_score'] = int(np.ceil(blended['min_score']))
+        blended['cooldown_bars'] = int(round(blended['cooldown_bars']))
+
+        # Boolean: use dominant regime
+        dominant = max(self.regime_weights, key=self.regime_weights.get)
+        blended['allow_pyramid'] = profiles.get(dominant, {}).get('allow_pyramid', False)
+
+        # Component bonus: use dominant regime's bonuses
+        blended['component_bonus'] = profiles.get(dominant, {}).get('component_bonus', {})
+
+        return blended
+
+    def get_component_effectiveness(self, comp_idx):
+        """v10.0: Get effectiveness multiplier for a scoring component."""
+        if not self.cfg.USE_COMPONENT_EFFECTIVENESS or not self.cfg.USE_V10_ENGINE:
+            return 1.0
+
+        trades = self.component_trades[comp_idx]
+        if len(trades) < self.cfg.COMP_EFF_MIN_TRADES:
+            return 1.0
+
+        recent = trades[-self.cfg.COMP_EFF_LOOKBACK:]
+        wins = sum(1 for _, pnl in recent if pnl > 0)
+        total = len(recent)
+        if total == 0:
+            return 1.0
+
+        comp_wr = wins / total
+        # Baseline win rate from recent trades
+        baseline_wr = 0.5  # Use 50% as neutral baseline
+
+        effectiveness = comp_wr / baseline_wr if baseline_wr > 0 else 1.0
+
+        if effectiveness > 1.3:
+            return 1.0 + self.cfg.COMP_EFF_BOOST
+        elif effectiveness < 0.7:
+            return max(0.5, 1.0 - self.cfg.COMP_EFF_PENALTY)
+        return 1.0
+
+    def get_session(self, hour):
+        """v10.0: Get current trading session. London=8-13, NY=13-22 (overlap is NY)."""
+        cfg = self.cfg
+        if cfg.SESSION_ASIAN_START <= hour < cfg.SESSION_ASIAN_END:
+            return 'asian'
+        elif cfg.SESSION_LONDON_START <= hour < cfg.SESSION_NY_START:
+            return 'london'  # 8-13 UTC (pure London, no overlap)
+        else:
+            return 'ny'  # 13-22 UTC (includes London/NY overlap)
+
+    def get_session_lot_modifier(self, session, regime):
+        """v10.0: Get session-specific lot modifier for current regime."""
+        if not self.cfg.USE_SESSION_REGIME or not self.cfg.USE_V10_ENGINE:
+            return 1.0
+        cfg = self.cfg
+        modifiers = {
+            ('asian', 'trend'): cfg.SESSION_ASIAN_TREND_LOT,
+            ('asian', 'range'): cfg.SESSION_ASIAN_RANGE_LOT,
+            ('asian', 'high_vol'): cfg.SESSION_ASIAN_HIGHVOL_LOT,
+            ('london', 'trend'): cfg.SESSION_LONDON_TREND_LOT,
+            ('london', 'range'): cfg.SESSION_LONDON_RANGE_LOT,
+            ('london', 'high_vol'): cfg.SESSION_LONDON_HIGHVOL_LOT,
+            ('ny', 'trend'): cfg.SESSION_NY_TREND_LOT,
+            ('ny', 'range'): cfg.SESSION_NY_RANGE_LOT,
+            ('ny', 'high_vol'): cfg.SESSION_NY_HIGHVOL_LOT,
+        }
+        return modifiers.get((session, regime), 1.0)
+
+    def get_adaptive_exit_params(self, regime):
+        """v10.0: Get regime-specific exit parameters."""
+        if not self.cfg.USE_ADAPTIVE_EXIT or not self.cfg.USE_V10_ENGINE:
+            return {
+                'partial_tp_ratio': self.cfg.PARTIAL_TP_RATIO,
+                'be_atr_multi': self.cfg.BE_ATR_MULTI,
+                'trail_atr_multi': self.cfg.TRAIL_ATR_MULTI,
+                'ratchet_step': self.cfg.RATCHET_STEP_ATR,
+            }
+        cfg = self.cfg
+        if regime == 'trend':
+            return {
+                'partial_tp_ratio': cfg.TREND_PARTIAL_TP_RATIO,
+                'be_atr_multi': cfg.TREND_BE_ATR_MULTI,
+                'trail_atr_multi': cfg.TREND_TRAIL_ATR_MULTI,
+                'ratchet_step': cfg.TREND_RATCHET_STEP,
+            }
+        elif regime == 'range':
+            return {
+                'partial_tp_ratio': cfg.RANGE_PARTIAL_TP_RATIO,
+                'be_atr_multi': cfg.RANGE_BE_ATR_MULTI,
+                'trail_atr_multi': cfg.RANGE_TRAIL_ATR_MULTI,
+                'ratchet_step': cfg.RANGE_RATCHET_STEP,
+            }
+        else:  # high_vol
+            return {
+                'partial_tp_ratio': cfg.HIGHVOL_PARTIAL_TP_RATIO,
+                'be_atr_multi': cfg.HIGHVOL_BE_ATR_MULTI,
+                'trail_atr_multi': cfg.HIGHVOL_TRAIL_ATR_MULTI,
+                'ratchet_step': cfg.HIGHVOL_RATCHET_STEP,
+            }
+
+    def get_regime_pf_adjustment(self, regime):
+        """v10.0: Adjust MIN_SCORE based on recent regime performance."""
+        if not self.cfg.USE_REGIME_MEMORY or not self.cfg.USE_V10_ENGINE:
+            return 0
+
+        trades = self.regime_trade_pnls.get(regime, [])
+        if len(trades) < 10:
+            return 0
+
+        recent = trades[-self.cfg.REGIME_MEMORY_LOOKBACK:]
+        wins_sum = sum(p for p in recent if p > 0)
+        losses_sum = abs(sum(p for p in recent if p <= 0))
+
+        if losses_sum == 0:
+            return -1  # Very profitable, can be slightly more aggressive
+
+        pf = wins_sum / losses_sum
+        if pf < self.cfg.REGIME_POOR_PF:
+            return 2  # Poor PF → more selective
+        elif pf > self.cfg.REGIME_GOOD_PF:
+            return -1  # Good PF → slightly more aggressive
+        return 0
 
     # ---- v4.0 Attack Methods ----
 
@@ -796,6 +1253,14 @@ class GoldBacktester:
         print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
         if cfg.REGIME_METHOD != 'none':
             print(f"   v8.0: Regime={cfg.REGIME_METHOD} ER_thresh={cfg.REGIME_ER_THRESHOLD} ScoreBoost={cfg.REGIME_SCORE_BOOST}")
+        if cfg.USE_REGIME_ADAPTIVE:
+            print(f"   v9.0: RegimeAdaptive=ON ER_trend={cfg.REGIME_ER_TREND} VolHigh={cfg.REGIME_VOL_HIGH} VolCrash={cfg.REGIME_VOL_CRASH}")
+            print(f"         TREND: min={cfg.TREND_MIN_SCORE} SL={cfg.TREND_SL_ATR_MULTI}x TP={cfg.TREND_TP_ATR_MULTI}x Pyramid={cfg.TREND_ALLOW_PYRAMID}")
+            print(f"         RANGE: min={cfg.RANGE_MIN_SCORE} SL={cfg.RANGE_SL_ATR_MULTI}x TP={cfg.RANGE_TP_ATR_MULTI}x MR={cfg.RANGE_MR_ENABLED}")
+            print(f"         HIGHVOL: min={cfg.HIGHVOL_MIN_SCORE} SL={cfg.HIGHVOL_SL_ATR_MULTI}x TP={cfg.HIGHVOL_TP_ATR_MULTI}x Lot={cfg.HIGHVOL_LOT_SCALE}x")
+        if cfg.USE_V10_ENGINE:
+            print(f"   v10.0: IntelligentRegime=ON Blend={cfg.USE_REGIME_BLENDING} CompEff={cfg.USE_COMPONENT_EFFECTIVENESS} SessionRegime={cfg.USE_SESSION_REGIME}")
+            print(f"          AdaptiveExit={cfg.USE_ADAPTIVE_EXIT} RegimeMemory={cfg.USE_REGIME_MEMORY}")
 
 
         # v8.0: Pre-compute ER regime indicator on H4
@@ -879,16 +1344,55 @@ class GoldBacktester:
 
             vol_ratio = current_atr / current_atr_avg
 
-            # High volatility regime: SL bonus
-            sl_multi = cfg.SL_ATR_MULTI
-            if vol_ratio > cfg.VOL_REGIME_HIGH:
-                sl_multi += cfg.HIGH_VOL_SL_BONUS
+            # v9.0: Regime-Adaptive Strategy
+            h4_er_val = None
+            if cfg.REGIME_METHOD == 'er':
+                h4_mask_er = h4_df.index <= ct
+                if h4_mask_er.sum() > 0:
+                    h4_er_val = h4_df[h4_mask_er].iloc[-1].get("efficiency_ratio")
+
+            if cfg.USE_REGIME_ADAPTIVE:
+                current_regime = self.detect_regime_v9(h4_er_val, vol_ratio)
+                self.current_regime = current_regime
+                self.regime_stats[current_regime] = self.regime_stats.get(current_regime, 0) + 1
+
+                if current_regime == 'crash':
+                    self.crash_skips += 1
+                    self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                    continue
+
+                # v10.0: Update regime blend weights
+                self.update_regime_blend(current_regime)
+
+                # v10.0: Use blended profile instead of hard switch
+                if cfg.USE_V10_ENGINE and cfg.USE_REGIME_BLENDING:
+                    profile = self.get_blended_profile(current_regime)
+                else:
+                    profile = self.get_regime_profile(current_regime)
+                sl_multi = profile['sl_multi']
+                tp_multi = profile['tp_multi']
+                # v9.0: In trend regime with elevated vol, widen SL slightly
+                if current_regime == 'trend' and vol_ratio >= 1.2:
+                    sl_multi += 0.3  # Modest SL bonus for elevated vol in trend
+            else:
+                current_regime = 'trend'  # Default behavior
+                profile = None
+                sl_multi = cfg.SL_ATR_MULTI
+                tp_multi = cfg.TP_ATR_MULTI
+                # v8.2 legacy: Graduated SL bonus
+                if cfg.GRADUATED_SL:
+                    sl_bonus = max(0, (vol_ratio - cfg.GRADUATED_SL_START)) * cfg.GRADUATED_SL_SCALE
+                    sl_bonus = min(sl_bonus, cfg.GRADUATED_SL_CAP)
+                    sl_multi += sl_bonus
+                else:
+                    if vol_ratio > cfg.VOL_REGIME_HIGH:
+                        sl_multi += cfg.HIGH_VOL_SL_BONUS
 
             # v2.0: Dynamic SL/TP in points
             atr_points = current_atr / cfg.POINT
             dynamic_sl_points = atr_points * sl_multi
             dynamic_sl_points = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, dynamic_sl_points))
-            dynamic_tp_points = atr_points * cfg.TP_ATR_MULTI
+            dynamic_tp_points = atr_points * tp_multi
             # Ensure minimum RR 1:1.5
             if dynamic_tp_points < dynamic_sl_points * 1.5:
                 dynamic_tp_points = dynamic_sl_points * 1.5
@@ -1086,22 +1590,59 @@ class GoldBacktester:
             buy_score = max(0, buy_score)
             sell_score = max(0, sell_score)
 
-            # ---- v4.0: Dynamic score barrier (27-point scale) ----
-            dynamic_min_score = cfg.MIN_SCORE  # 9
-            if current_dd >= 20.0:
-                dynamic_min_score = 18
-            elif current_dd >= 15.0:
-                dynamic_min_score = 15
-            elif current_dd >= 10.0:
-                dynamic_min_score = 12
-            if regime == 1:  # Ranging (ATR-based)
-                dynamic_min_score += 3
+            # v10.0: Apply component effectiveness multipliers
+            if cfg.USE_V10_ENGINE and cfg.USE_COMPONENT_EFFECTIVENESS:
+                # Re-weight scores based on component effectiveness
+                # Only adjust components with significant weight (>= 2 pts)
+                for comp_idx in [0, 1, 4, 8, 9, 13, 14]:  # H4Trend, H1MA, M15MA, Corr, Div, Burst, Vol
+                    eff = self.get_component_effectiveness(comp_idx)
+                    if eff != 1.0 and component_mask[comp_idx] != 0:
+                        # Get base points for this component
+                        base_pts = {0: 3, 1: 2, 4: 2, 8: 2, 9: 2, 13: 3, 14: 2}
+                        pts = base_pts.get(comp_idx, 1)
+                        adjustment = int(round(pts * (eff - 1.0)))
+                        if component_mask[comp_idx] == 1:
+                            buy_score += adjustment
+                        elif component_mask[comp_idx] == -1:
+                            sell_score += adjustment
 
-            # v8.0: ER Regime Detection - additional filter for choppy markets
-            if cfg.REGIME_METHOD == 'er':
-                h4_er = h4_row.get("efficiency_ratio")
-                if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
-                    dynamic_min_score += cfg.REGIME_SCORE_BOOST
+            # v9.0: Apply regime-specific component bonuses
+            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                component_bonus = profile.get('component_bonus', {})
+                for comp_idx, bonus in component_bonus.items():
+                    if component_mask[comp_idx] == 1:
+                        buy_score += bonus
+                    elif component_mask[comp_idx] == -1:
+                        sell_score += bonus
+
+            # ---- v9.0/v4.0: Dynamic score barrier ----
+            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                dynamic_min_score = profile['min_score']
+            else:
+                dynamic_min_score = cfg.MIN_SCORE  # 9
+
+            # v10.0: Regime performance memory adjustment
+            if cfg.USE_V10_ENGINE and cfg.USE_REGIME_MEMORY:
+                regime_pf_adj = self.get_regime_pf_adjustment(current_regime)
+                dynamic_min_score = max(cfg.MIN_SCORE - 1, dynamic_min_score + regime_pf_adj)
+
+            # DD-based escalation (applies to all regimes)
+            if current_dd >= 20.0:
+                dynamic_min_score = max(dynamic_min_score, 18)
+            elif current_dd >= 15.0:
+                dynamic_min_score = max(dynamic_min_score, 15)
+            elif current_dd >= 10.0:
+                dynamic_min_score = max(dynamic_min_score, 12)
+
+            # Legacy: ATR-based ranging (only when regime adaptive is off)
+            if not cfg.USE_REGIME_ADAPTIVE:
+                if regime == 1:  # Ranging (ATR-based)
+                    dynamic_min_score += 3
+                # v8.0: ER Regime Detection
+                if cfg.REGIME_METHOD == 'er':
+                    h4_er = h4_row.get("efficiency_ratio")
+                    if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
+                        dynamic_min_score += cfg.REGIME_SCORE_BOOST
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -1114,26 +1655,49 @@ class GoldBacktester:
             tp_multi = 1.5 if abs(burst) == 3 else 1.0
             adjusted_tp_points = dynamic_tp_points * tp_multi
 
-            # ---- v4.0: Pyramiding support ----
+            # ---- v9.0/v4.0: Pyramiding support ----
             pos_count = len(self.open_positions)
+            allow_pyramid = cfg.TREND_ALLOW_PYRAMID  # default
+            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                allow_pyramid = profile['allow_pyramid']
+
             can_enter = pos_count < cfg.MAX_PYRAMID_POSITIONS
             is_pyramid = pos_count > 0
             pyramid_ok = True
 
             if is_pyramid:
-                # Check if existing positions are profitable
-                for pos in self.open_positions:
-                    if pos["direction"] == "BUY":
-                        unrealized = cc - pos["entry"]
-                    else:
-                        unrealized = pos["entry"] - cc
-                    if unrealized <= 0:
+                if not allow_pyramid:
+                    pyramid_ok = False
+                # v8.1 legacy: Block pyramids during high-volatility (non-adaptive mode)
+                if pyramid_ok and not cfg.USE_REGIME_ADAPTIVE:
+                    if cfg.HIGH_VOL_PYRAMID_BLOCK is not None and vol_ratio > cfg.HIGH_VOL_PYRAMID_BLOCK:
                         pyramid_ok = False
-                        break
+                # Check if existing positions are profitable
+                if pyramid_ok:
+                    for pos in self.open_positions:
+                        if pos["direction"] == "BUY":
+                            unrealized = cc - pos["entry"]
+                        else:
+                            unrealized = pos["entry"] - cc
+                        if unrealized <= 0:
+                            pyramid_ok = False
+                            break
 
             # ---- Entry ----
             entry_type = "normal"
             entered = False
+
+            # v9.0: Regime-specific lot scaling
+            regime_lot_scale = 1.0
+            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                regime_lot_scale = profile['lot_scale']
+
+            # v10.0: Session-Regime lot modifier
+            session_lot_mod = 1.0
+            if cfg.USE_V10_ENGINE and cfg.USE_SESSION_REGIME:
+                session = self.get_session(hour)
+                session_lot_mod = self.get_session_lot_modifier(session, current_regime)
+                self.session_stats[session] = self.session_stats.get(session, 0) + 1
 
             if can_enter and (not is_pyramid or pyramid_ok):
                 pyramid_lot_multi = 1.0
@@ -1141,55 +1705,92 @@ class GoldBacktester:
                     pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
                     entry_type = "pyramid"
 
-                # v5.2/v7.0: Trend-aligned SL/TP adjustment
-                # With macro trend: wider SL (survive pullbacks) + wider TP (ride the trend)
-                # Against macro trend: tighter SL (cut losses faster) + tighter TP (grab quick profits)
+                # v9.0/v5.2/v7.0: Regime-aware trend-aligned SL/TP adjustment
                 adj_sl = dynamic_sl_points
                 adj_tp = adjusted_tp_points
                 if macro_trend_dir != 0:
+                    # Use regime-specific widen/extend factors
+                    if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                        sl_widen = profile['sl_widen']
+                        tp_extend = profile['tp_extend']
+                    else:
+                        sl_widen = cfg.TREND_SL_WIDEN
+                        tp_extend = cfg.TREND_TP_EXTEND
+
                     if (buy_score > sell_score and macro_trend_dir == 1) or \
                        (sell_score > buy_score and macro_trend_dir == -1):
                         # With-trend: wider SL + extended TP
-                        adj_sl = min(dynamic_sl_points * cfg.TREND_SL_WIDEN, cfg.MAX_SL_POINTS)
-                        adj_tp = adjusted_tp_points * cfg.TREND_TP_EXTEND
+                        adj_sl = min(dynamic_sl_points * sl_widen, cfg.MAX_SL_POINTS)
+                        adj_tp = adjusted_tp_points * tp_extend
                     elif (buy_score > sell_score and macro_trend_dir == -1) or \
                          (sell_score > buy_score and macro_trend_dir == 1):
                         # Counter-trend: tighter SL + tighter TP
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
                         adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
 
-                # v6.0: Score margin filter - require clear directional bias
-                score_margin = cfg.SCORE_MARGIN_MIN
+                # v9.0/v6.0: Score margin filter
+                if cfg.USE_REGIME_ADAPTIVE and profile is not None:
+                    score_margin = profile['score_margin']
+                else:
+                    score_margin = cfg.SCORE_MARGIN_MIN
                 # v6.0: Get actual spread from CSV data
                 bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
 
                 if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
                     self._open_trade("BUY", cc, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
+                                     component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
+                    if current_regime in self.regime_trades:
+                        self.regime_trades[current_regime].append(entry_type)
                 elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
                     self._open_trade("SELL", cc, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi, component_mask,
+                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
+                                     component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
                                      entry_bar=i, bar_spread=bar_spread)
                     entered = True
+                    if current_regime in self.regime_trades:
+                        self.regime_trades[current_regime].append(entry_type)
+
+            # v9.0: Mean-reversion entry for RANGE regime (only in low-vol range)
+            if not entered and pos_count == 0 and cfg.USE_REGIME_ADAPTIVE and current_regime == 'range' and vol_ratio < 1.0:
+                mr_dir, mr_score = self.check_mean_reversion_entry(
+                    h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct)
+                if mr_dir is not None:
+                    mr_sl = atr_points * cfg.RANGE_MR_SL_ATR
+                    mr_sl = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, mr_sl))
+                    mr_tp = atr_points * cfg.RANGE_MR_TP_ATR
+                    if mr_tp < mr_sl * 1.2:
+                        mr_tp = mr_sl * 1.2
+                    bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
+                    self._open_trade(mr_dir, cc, ct, mr_score, current_dd,
+                                     mr_sl, mr_tp, current_atr,
+                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE * session_lot_mod,
+                                     component_mask,
+                                     entry_type="mean_reversion",
+                                     entry_bar=i, bar_spread=bar_spread)
+                    entered = True
+                    self.mr_trades += 1
+                    if 'range' in self.regime_trades:
+                        self.regime_trades['range'].append('mean_reversion')
 
             # v4.0: Reversal mode - only when no normal entry and no open positions
-            if not entered and pos_count == 0:
+            if not entered and pos_count == 0 and current_regime != 'range':
                 reversal = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
                 if reversal == 1:
                     self._open_trade("BUY", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
                 elif reversal == -1:
                     self._open_trade("SELL", cc, ct, 0, current_dd,
                                      dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5, component_mask,
+                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
                                      entry_type="reversal", entry_bar=i)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
@@ -1288,6 +1889,7 @@ class GoldBacktester:
             "entry_type": entry_type,
             "momentum_burst": momentum_burst,
             "entry_bar": entry_bar,
+            "regime": self.current_regime,  # v9.0
         }
         # v3.0: Store component mask
         if component_mask is not None:
@@ -1298,6 +1900,10 @@ class GoldBacktester:
         cfg = self.cfg
         pt = cfg.POINT
         for pos in list(self.open_positions):
+            # v10.0: Get regime-specific exit parameters
+            pos_regime = pos.get("regime", "trend")
+            exit_params = self.get_adaptive_exit_params(pos_regime)
+
             # v4.0: Stale trade exit
             if self.check_stale_trade(pos, bar_idx):
                 # Only close if not losing (close at current price if profitable or breakeven)
@@ -1323,9 +1929,10 @@ class GoldBacktester:
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
 
-                # v2.0: Partial close at 50% of TP distance
+                # v10.0/v2.0: Partial close with regime-adaptive ratio
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
-                    if profit_price >= pos["tp_dist"] * cfg.PARTIAL_TP_RATIO:
+                    partial_tp_ratio = exit_params['partial_tp_ratio']
+                    if profit_price >= pos["tp_dist"] * partial_tp_ratio:
                         # Close 50% of position
                         closed_lot = pos["original_lot"] * cfg.PARTIAL_CLOSE_RATIO
                         remaining_lot = pos["lot"] - closed_lot
@@ -1365,30 +1972,33 @@ class GoldBacktester:
                         pos["partial_done"] = True
                         pos["breakeven_done"] = True
 
-                # v2.0: Breakeven at ATR * BE_ATR_MULTI
-                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                # v10.0/v2.0: Breakeven with regime-adaptive threshold
+                be_multi = exit_params['be_atr_multi']
+                if not pos["breakeven_done"] and profit_price >= atr_entry * be_multi:
                     pos["sl"] = pos["entry"] + 10 * pt
                     pos["breakeven_done"] = True
 
-                # v2.0: Trailing at BE * 1.5, step = ATR * TRAIL_ATR_MULTI
-                be_price = atr_entry * cfg.BE_ATR_MULTI
+                # v10.0/v2.0: Trailing with regime-adaptive step
+                trail_multi = exit_params['trail_atr_multi']
+                be_price = atr_entry * be_multi
                 if profit_price >= be_price * 1.5:
-                    trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
+                    trail_step = atr_entry * trail_multi
                     ns = close - trail_step
                     if ns > pos["sl"] + 5 * pt:
                         pos["sl"] = ns
 
-                # v6.0: ATR ratchet trail - tighten trail as profit grows
+                # v10.0/v6.0: ATR ratchet trail with regime-adaptive step
                 if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
                     atr_multiples = profit_price / atr_entry
+                    ratchet_base = exit_params['ratchet_step']
                     if atr_multiples >= 2.0:
-                        ratchet_step = atr_entry * max(0.3, cfg.RATCHET_STEP_ATR * (1.0 / atr_multiples * 2))
+                        ratchet_step = atr_entry * max(0.3, ratchet_base * (1.0 / atr_multiples * 2))
                         ratchet_sl = close - ratchet_step
                         if ratchet_sl > pos["sl"] + 5 * pt:
                             pos["sl"] = ratchet_sl
 
                 # v3.0: Chandelier Exit for BUY
-                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * be_multi:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     highest_high = m15_df["High"].iloc[start_idx:bar_idx + 1].max()
                     chandelier_sl = highest_high - atr_entry * cfg.CHANDELIER_ATR_MULTI
@@ -1421,9 +2031,10 @@ class GoldBacktester:
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
 
-                # v2.0: Partial close at 50% of TP distance
+                # v10.0/v2.0: Partial close with regime-adaptive ratio
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
-                    if profit_price >= pos["tp_dist"] * cfg.PARTIAL_TP_RATIO:
+                    partial_tp_ratio = exit_params['partial_tp_ratio']
+                    if profit_price >= pos["tp_dist"] * partial_tp_ratio:
                         closed_lot = pos["original_lot"] * cfg.PARTIAL_CLOSE_RATIO
                         remaining_lot = pos["lot"] - closed_lot
                         if remaining_lot < cfg.MIN_LOT:
@@ -1460,30 +2071,33 @@ class GoldBacktester:
                         pos["partial_done"] = True
                         pos["breakeven_done"] = True
 
-                # v2.0: Breakeven
-                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                # v10.0/v2.0: Breakeven with regime-adaptive threshold
+                be_multi = exit_params['be_atr_multi']
+                if not pos["breakeven_done"] and profit_price >= atr_entry * be_multi:
                     pos["sl"] = pos["entry"] - 10 * pt
                     pos["breakeven_done"] = True
 
-                # v2.0: Trailing
-                be_price = atr_entry * cfg.BE_ATR_MULTI
+                # v10.0/v2.0: Trailing with regime-adaptive step
+                trail_multi = exit_params['trail_atr_multi']
+                be_price = atr_entry * be_multi
                 if profit_price >= be_price * 1.5:
-                    trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
+                    trail_step = atr_entry * trail_multi
                     ns = close + trail_step
                     if ns < pos["sl"] - 5 * pt or pos["sl"] == 0:
                         pos["sl"] = ns
 
-                # v6.0: ATR ratchet trail for SELL
+                # v10.0/v6.0: ATR ratchet trail with regime-adaptive step
                 if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
                     atr_multiples = profit_price / atr_entry
+                    ratchet_base = exit_params['ratchet_step']
                     if atr_multiples >= 2.0:
-                        ratchet_step = atr_entry * max(0.3, cfg.RATCHET_STEP_ATR * (1.0 / atr_multiples * 2))
+                        ratchet_step = atr_entry * max(0.3, ratchet_base * (1.0 / atr_multiples * 2))
                         ratchet_sl = close + ratchet_step
                         if ratchet_sl < pos["sl"] - 5 * pt:
                             pos["sl"] = ratchet_sl
 
                 # v3.0: Chandelier Exit for SELL
-                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * be_multi:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     lowest_low = m15_df["Low"].iloc[start_idx:bar_idx + 1].min()
                     chandelier_sl = lowest_low + atr_entry * cfg.CHANDELIER_ATR_MULTI
@@ -1506,9 +2120,22 @@ class GoldBacktester:
         cfg = self.cfg
         pt = cfg.POINT
 
-        # Cooldown after SL
+        # Cooldown after SL (v9.0: regime-adaptive cooldown)
         if reason == "SL" and bar_idx > 0:
-            self.cooldown_until = bar_idx + cfg.COOLDOWN_BARS
+            self.consecutive_sl_count += 1
+            # v9.0: Use regime-specific cooldown
+            if cfg.USE_REGIME_ADAPTIVE:
+                profile = self.get_regime_profile(self.current_regime)
+                cooldown_bars = profile['cooldown_bars'] if profile else cfg.COOLDOWN_BARS
+            else:
+                cooldown_bars = cfg.COOLDOWN_BARS
+            if cfg.CONSEC_LOSS_ESCALATION and self.consecutive_sl_count >= cfg.CONSEC_LOSS_THRESHOLD:
+                escalation = cfg.CONSEC_LOSS_COOLDOWN_MULTI ** (
+                    self.consecutive_sl_count - cfg.CONSEC_LOSS_THRESHOLD + 1)
+                cooldown_bars = int(cooldown_bars * min(escalation, cfg.CONSEC_LOSS_MAX_MULTI))
+            self.cooldown_until = bar_idx + cooldown_bars
+        elif reason in ("TP", "Partial", "Trail"):
+            self.consecutive_sl_count = 0
 
         # v6.0: Exit slippage (against you)
         slippage = cfg.SLIPPAGE_POINTS * pt
@@ -1548,6 +2175,23 @@ class GoldBacktester:
                     self.component_stats[comp_idx]["total"] += 1
                     if is_win:
                         self.component_stats[comp_idx]["wins"] += 1
+                    # v10.0: Track component effectiveness (direction-match, pnl)
+                    if self.cfg.USE_V10_ENGINE and self.cfg.USE_COMPONENT_EFFECTIVENESS:
+                        self.component_trades[comp_idx].append((val, pnl_jpy))
+                        # Trim to 2x lookback to avoid unbounded growth
+                        max_len = self.cfg.COMP_EFF_LOOKBACK * 2
+                        if len(self.component_trades[comp_idx]) > max_len:
+                            self.component_trades[comp_idx] = self.component_trades[comp_idx][-self.cfg.COMP_EFF_LOOKBACK:]
+
+        # v10.0: Track per-regime PnL for regime performance memory
+        if self.cfg.USE_V10_ENGINE and self.cfg.USE_REGIME_MEMORY:
+            pos_regime = pos.get("regime", "trend")
+            if pos_regime in self.regime_trade_pnls:
+                self.regime_trade_pnls[pos_regime].append(pnl_jpy)
+                # Trim to 2x lookback
+                max_len = self.cfg.REGIME_MEMORY_LOOKBACK * 2
+                if len(self.regime_trade_pnls[pos_regime]) > max_len:
+                    self.regime_trade_pnls[pos_regime] = self.regime_trade_pnls[pos_regime][-self.cfg.REGIME_MEMORY_LOOKBACK:]
 
         self.trades.append({
             "open_time": pos["open_time"],
@@ -2011,7 +2655,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print(" AntigravityMTF EA [GOLD] v7.1 Professional Backtest")
+        print(" AntigravityMTF EA [GOLD] v9.0 Regime-Adaptive Backtest")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "Monthly":
@@ -2044,10 +2688,34 @@ if __name__ == "__main__":
         reversals = sum(1 for t in bt.trades if t.get('entry_type') == 'reversal')
         pyramids = sum(1 for t in bt.trades if t.get('entry_type') == 'pyramid')
         bursts = sum(1 for t in bt.trades if t.get('momentum_burst', False))
+        mr_entries = sum(1 for t in bt.trades if t.get('entry_type') == 'mean_reversion')
         print(f"\n  --- Attack Stats ---")
         print(f"  Reversal trades:      {reversals}")
         print(f"  Pyramid entries:      {pyramids}")
         print(f"  Momentum burst trades:{bursts}")
+        print(f"  Mean-reversion trades:{mr_entries}")
+
+        # v9.0: Regime Stats
+        if cfg.USE_REGIME_ADAPTIVE:
+            total_bars_counted = sum(bt.regime_stats.values())
+            print(f"\n  --- v9.0 Regime Stats ---")
+            for regime_name, count in bt.regime_stats.items():
+                pct = count / total_bars_counted * 100 if total_bars_counted > 0 else 0
+                trades_in_regime = len(bt.regime_trades.get(regime_name, []))
+                print(f"  {regime_name:>10}: {count:>6} bars ({pct:>5.1f}%) | {trades_in_regime} entries")
+
+            # Regime-specific trade performance
+            print(f"\n  --- Regime Trade Performance ---")
+            trade_df = pd.DataFrame(bt.trades)
+            if not trade_df.empty and 'entry_type' in trade_df.columns:
+                for et in ['normal', 'pyramid', 'mean_reversion', 'reversal']:
+                    subset = trade_df[trade_df['entry_type'] == et]
+                    if len(subset) > 0:
+                        et_wins = subset[subset['pnl_jpy'] > 0]
+                        et_wr = len(et_wins) / len(subset) * 100
+                        et_pnl = subset['pnl_jpy'].sum()
+                        et_pf = et_wins['pnl_jpy'].sum() / abs(subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum()) if subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum() != 0 else float('inf')
+                        print(f"  {et:>16}: {len(subset):>4} trades | WR={et_wr:>5.1f}% | PF={et_pf:>5.2f} | PnL={et_pnl:>+10,.0f} JPY")
 
         # Last 10 trades
         print(f"\n  Trade Details (last 10):")

@@ -47,7 +47,78 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 
 ## Version History
 
-### v8.0 (current) - ER Regime Detection (Range Market Filter)
+### v10.0 (current) - Intelligent Regime Engine
+- **Session-Regime Interaction**: セッション（Asian/London/NY）×レジーム（Trend/Range/HighVol）のマトリクスでロットスケール調整
+  - London TREND: lot x1.1（トレンドフォロー最適セッション）
+  - Asian TREND: lot x0.9（アジアはレンジ傾向）
+  - HIGH_VOL全セッション: lot x0.4-0.5（保守的）
+- **Dynamic Component Effectiveness**: 各スコアリングコンポーネントの直近精度をトラッキング
+  - 勝率がベースラインの1.3倍超: +0.3ポイントブースト
+  - 勝率がベースラインの0.7倍未満: -0.3ポイントペナルティ
+  - H4 RSI Alignment（WR 47.2%）やVolume Climax（WR 38.3%）を自動的に減点
+- **Adaptive Exit per Regime**: レジーム別出口戦略
+  - TREND: パーシャルクローズ遅延（55%TP）、BE閾値高め（1.6x ATR）、ワイドトレーリング（1.1x）
+  - RANGE: 早期パーシャル（40%TP）、早期BE（1.2x ATR）、タイトトレーリング（0.8x）
+  - HIGH_VOL: 最速パーシャル（35%TP）、最速BE（1.0x ATR）、最タイトトレーリング（0.6x）
+- **検証・不採用**: Regime Blending（パラメータ平均化でエッジ喪失）、Regime Memory（DD +5%悪化）
+- **A/Bテスト**: 各機能を個別にテスト → Session(PF+0.04), Exit(PF+0.04), CompEff(DD-0.1%) が有効
+- Config: `USE_V10_ENGINE=True`, `USE_SESSION_REGIME=True`, `USE_ADAPTIVE_EXIT=True`, `USE_COMPONENT_EFFECTIVENESS=True`
+- **2024-2026バックテスト結果 (v9.0 → v10.0)**:
+
+| Metric | v9.0 | v10.0 | Delta |
+|--------|------|-------|-------|
+| PF | 1.28 | **1.33** | **+0.05** |
+| WinRate | 52.7% | **54.7%** | **+2.0%** |
+| MaxDD | 10.4% | 10.8% | +0.4% |
+| Return | +138.0% | **+174.1%** | **+36.1%** |
+| Trades | 1734 | 1737 | +3 |
+| Sharpe | 2.76 | **3.03** | **+0.27** |
+| Calmar | 5.89 | **7.19** | **+1.30** |
+| Expectancy | +239/trade | **+301/trade** | **+62** |
+| Monthly WR | 56% | **59%** | **+3%** |
+| SELL PnL | +171K | **+210K** | **+39K** |
+
+- **PF, WR, Return, Sharpe, Calmar全指標改善。DDは微増(+0.4%)のみ**
+- **SELL方向の収益性大幅改善**: +171K → +210K（+23%）
+
+### v8.2 - Tighter Pyramid Volatility Gate
+- **ピラミッドブロック閾値引き下げ**: vol_ratio > 1.2 でピラミッドをブロック（v8.1は1.5）
+- vol_ratio 1.2-1.5の「デッドゾーン」でもピラミッドを制限し、高ボラ時の追加ポジション損失を抑制
+- Config: `HIGH_VOL_PYRAMID_BLOCK=1.2`
+- **検証・不採用**: Graduated SL (DD +4.5% 悪化), Consecutive Loss Cooldown (PF 1.07 壊滅)
+- **2024-2026バックテスト結果 (v8.1 → v8.2)**:
+
+| Metric | v8.1 | v8.2 | Delta |
+|--------|------|------|-------|
+| PF | 1.39 | 1.34 | -0.05 |
+| WinRate | 54.7% | 54.1% | -0.6% |
+| MaxDD | 11.0% | **10.9%** | -0.1% |
+| Return | +187.3% | +149.6% | -37.7% |
+| Trades | 1383 | 1256 | -127 |
+| Pyramids | 728 | 588 | -140 |
+| Jan2026 PnL | -27,305 | **-14,878** | +12,427 |
+
+- **DD微改善、Jan2026損失ほぼ半減**: 高ボラ期のピラミッド140件を追加ブロック
+- **リターン減少**: ピラミッド制限によりアグレッシブなポジション拡大を抑制。DDリスク低減とのトレードオフ
+
+### v8.1 - High-Volatility Pyramid Block
+- **高ボラ時ピラミッド制限**: vol_ratio > 1.5 の時にピラミッドエントリーをブロック
+- ボラティリティが平均の1.5倍を超える局面では追加ポジションのリスクが大きいため抑制
+- Config: `HIGH_VOL_PYRAMID_BLOCK=1.5`
+- **2024-2026バックテスト結果 (v8.0 → v8.1)**:
+
+| Metric | v8.0 | v8.1 | Delta |
+|--------|------|------|-------|
+| PF | 1.27 | **1.32** | +0.04 |
+| WinRate | 53.5% | **54.3%** | +0.7% |
+| MaxDD | 15.5% | **14.8%** | -0.7% |
+| Return | +131.8% | **+157.4%** | +25.7% |
+| Trades | 1749 | 1738 | -11 |
+| Pyramids | 928 | 903 | -25 |
+
+- **全指標改善、副作用ゼロ**: 25件の高ボラピラミッドをブロックしただけでリターン+25.7%改善
+
+### v8.0 - ER Regime Detection (Range Market Filter)
 - **Efficiency Ratio (ER) regime detection**: H4のER(20期間) < 0.3でレンジ/チョッピー相場と判定
 - **レンジ相場でMIN_SCORE += 3**: チョッピー相場では高品質シグナルのみエントリー
 - **トレード数約25%減少**: 低品質トレードをフィルタリング、勝率・PF向上
@@ -124,6 +195,16 @@ Gold (XAUUSD) 自動売買EA。MT5用MQL5コードとPythonバックテストシ
 - ATR SL/TP, Volatility regime, Session bonus, Momentum, Partial close
 
 ## Key Design Decisions
+- **v10.0: A/Bテスト駆動開発**: 5機能を個別テスト→3機能採用、2機能不採用。データ駆動で判断
+- **v10.0不採用: Regime Blending**: レジーム間パラメータのEMA平均化。Trend TP=4.0とRange TP=2.0を混ぜると3.0になり、どちらでも最適でなくなる。PF 1.17に悪化
+- **v10.0不採用: Regime Memory**: レジーム別PFトラッキングでMIN_SCORE調整。トレード数半減でDDが+5%悪化。分散投資効果の喪失
+- **v10.0: Session-Regime**: London×Trendで+10%ロットブーストが最適。1.2以上はDD悪化
+- **v10.0: Component Effectiveness**: WR 47%以下のコンポーネント（H4 RSI, Volume Climax）を自動減点。DDコントロール効果
+- **v10.0: Adaptive Exit**: TREND=ワイド→利益拡大、RANGE=タイト→早期利確、HIGH_VOL=最タイト→保護。Exit単体ではDD増だがCompEffと組合せでDD制御
+- **v8.2: ピラミッドブロック閾値1.2**: vol_ratio 1.2-1.5の「デッドゾーン」でもピラミッドを制限。Jan2026損失-27K→-15K（ほぼ半減）
+- **v8.2不採用: Graduated SL**: SLを段階的に広げるとDD +4.5%悪化。SLが広い=損切り時の損失額が大きい
+- **v8.2不採用: Consecutive Loss Cooldown**: 3連続SL後のクールダウン延長でPF 1.07に壊滅。トレード数半減で利益機会を逃す
+- **v8.1: 高ボラピラミッド制限**: vol_ratio > 1.5（ATRが平均の1.5倍超）の局面ではピラミッドをブロック。高ボラ時の追加ポジションは損失が拡大しやすく、25件ブロックだけでリターン+25.7%改善
 - **v8.0: ERレジーム検出**: Efficiency Ratio（方向効率比）でトレンド/レンジを判定。ADXやBBWidthよりも優れた結果。レンジ相場ではMIN_SCOREを+3して低品質トレードをフィルタ
 - **v8.0: Mean-Reversion不採用**: RSI極値・BB反転の逆張り層を検証したが、ER regime detectionより効果が小さく複雑性が増すため不採用
 - **v7.0: BUY/SELL対称スコアリング**: ベア相場でもSELLが適切にトリガーされるよう、RSI・H4RSI・S/Rのスコアリングを対称化
