@@ -159,6 +159,13 @@ class GoldConfig:
     # Score quality filter
     SCORE_MARGIN_MIN = 2             # Minimum gap: buy_score - sell_score >= 2
 
+    # v10.1: RSI Momentum Confirmation
+    # Require H1 RSI to confirm momentum direction before entry
+    # BUY: RSI > 50 AND rising (vs N bars ago), SELL: RSI < 50 AND falling
+    # WFA improvement: 11/16 → 14/16 on v4.0 backtester
+    USE_RSI_MOMENTUM_CONFIRM = True
+    RSI_MOMENTUM_LOOKBACK = 3
+
     # Time-decay SL tightening
     USE_TIME_DECAY_SL = True
     TIME_DECAY_START_BARS = 48       # Start tightening after 12h (48 M15 bars)
@@ -1822,6 +1829,21 @@ class GoldBacktester:
                     score_margin = profile['score_margin']
                 else:
                     score_margin = cfg.SCORE_MARGIN_MIN
+                # v10.1: RSI Momentum Confirmation
+                if getattr(cfg, 'USE_RSI_MOMENTUM_CONFIRM', False):
+                    rsi_val = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
+                    rsi_lb = getattr(cfg, 'RSI_MOMENTUM_LOOKBACK', 3)
+                    h1_data = h1_df[h1_mask]
+                    rsi_past = 50
+                    if len(h1_data) > rsi_lb and pd.notna(h1_data["rsi"].iloc[-1 - rsi_lb]):
+                        rsi_past = h1_data["rsi"].iloc[-1 - rsi_lb]
+                    if buy_score > sell_score:
+                        if not (rsi_val > 50 and rsi_val > rsi_past):
+                            buy_score = 0
+                    elif sell_score > buy_score:
+                        if not (rsi_val < 50 and rsi_val < rsi_past):
+                            sell_score = 0
+
                 # v6.0: Get actual spread from CSV data
                 bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
 
