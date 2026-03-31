@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v13.0: Multi-scale ER regime + MAE/MFE + Spike detect   |
+//|            v14.0: Python backtester sync (13 critical fixes)       |
 //+------------------------------------------------------------------+
 // CODEX-FIX: NEW HIGH #9 - Structural overfit risk documentation
 // This EA uses 47 input parameters and ~200 hardcoded parameters across 15 scoring
@@ -12,8 +12,8 @@
 //   4. Most parameters are hardcoded at WFA-validated defaults to prevent over-optimization
 // Traders should re-run WFA periodically (quarterly) and monitor live vs backtest divergence.
 #property copyright "Antigravity Trading System"
-#property version   "13.00"
-#property description "XAUUSD専用 v13.0: マルチスケールER + コンポーネント相関キャップ + スパイク検知 + MAE/MFE品質 + 段階的リバーサル"
+#property version   "14.00"
+#property description "XAUUSD専用 v14.0: Python backtester完全同期 (13 critical fixes)"
 
 #include <Trade/Trade.mqh>
 
@@ -29,7 +29,7 @@
 // ================================================================
 
 input group "=== リスク管理 ==="
-input double RiskPercent       = 0.3;      // リスク% (ATR-SLで自動調整)
+input double RiskPercent       = 0.75;     // SYNC-FIX #13: リスク% 0.3→0.75 (Python同期)
 input double MaxLots           = 0.50;     // 最大ロット
 input double MinLots           = 0.01;     // 最小ロット
 input int    MaxSpread         = 50;       // 最大スプレッド(ポイント)
@@ -75,8 +75,8 @@ input double PyramidLotDecay   = 0.5;      // ピラミッド追加ロット減�
 input group "=== トレンドSL/TP調整 ==="
 input double Trend_SL_Widen    = 1.5;      // 順トレンドSL倍率 (WFA: 1.5, プルバック耐性)
 input double Trend_SL_Tighten  = 0.6;      // 逆トレンドSL倍率 (WFA: 0.6, 素早い損切り)
-input double Trend_TP_Extend   = 1.2;      // 順トレンドTP倍率
-input double Trend_TP_Tighten  = 0.8;      // 逆トレンドTP倍率
+input double Trend_TP_Extend   = 1.2;      // SYNC-FIX #8: UNUSED (Python has no TP trend adjustment)
+input double Trend_TP_Tighten  = 0.8;      // SYNC-FIX #8: UNUSED (Python has no TP trend adjustment)
 
 input group "=== レジーム適応 ==="
 input bool   UseRegimeAdaptive = false;    // レジーム適応戦略ON/OFF（MQ5独自、まずOFFでテスト）
@@ -129,7 +129,7 @@ const bool   UseEquityCurveFilter = true;  // HARDCODED: WFA検証済みtrue
 const bool   UseAdaptiveSizing = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseMomentumBurst  = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseVolumeClimax   = false;    // HARDCODED: WFA検証済み (false=無効, WR34%ノイズ)
-const bool   UseReversalMode   = false;    // DISABLED: v13.0段階的リバーサルが72%のトレードを生成し赤字化の原因
+const bool   UseReversalMode   = true;     // SYNC-FIX #7: Re-enabled with strict 4/4 AND conditions (Python同期)
 // WARNING: 以下のv9-v12機能はMQ5独自でPython WFA未検証
 // MT5テストで効果を確認してからONにすること
 const bool   UseTimeDecaySL    = false;    // v9.0 時間減衰SL（MQ5独自、未検証）
@@ -543,7 +543,7 @@ int OnInit()
    g_tqCount = 0;
    g_tqIndex = 0;
 
-   Print("AntigravityMTF EA [GOLD] v13.0 初期化完了");
+   Print("AntigravityMTF EA [GOLD] v14.0 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
@@ -633,6 +633,18 @@ void OnTick()
    if(!IsTradeAllowed()) return;
    if(!CheckTimeFilter()) return;
    if(!CheckSpread()) return;
+
+   // SYNC-FIX #3: Dead Zone Filter (Python: USE_DEAD_ZONE_FILTER)
+   {
+      MqlDateTime dtDZ;
+      TimeCurrent(dtDZ);
+      int gmtHourDZ = (dtDZ.hour - GMTOffset + 24) % 24;
+      int posCountDZ = CountMyPositions();
+      // Dead zone: block ALL entries at hours 11, 12
+      if(gmtHourDZ == 11 || gmtHourDZ == 12) return;
+      // Dead zone: block NEW positions (not pyramids) at hours 14, 18, 21
+      if(posCountDZ == 0 && (gmtHourDZ == 14 || gmtHourDZ == 18 || gmtHourDZ == 21)) return;
+   }
 
    // v13.0: Realtime volatility spike detection
    if(UseRealtimeSpike)
@@ -788,11 +800,11 @@ void OnTick()
    if(h1MACross == 1)       { buyScore += (int)MathFloor(2 * ce1);  buyReasons  += "H1MA^ "; componentMask |= (1 << 1); }
    else if(h1MACross == -1) { sellScore += (int)MathFloor(2 * ce1);  sellReasons += "H1MAv "; componentMask |= (1 << 1); }
 
-   // 3. H1 RSI（1点）
+   // SYNC-FIX #11: H1 RSI boundaries match Python (60-65 buy, 35-40 sell)
    double h1Rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(h1Rsi > 40 && h1Rsi < 60)         { int rsiPts = (int)MathFloor(1 * ce2); buyScore += rsiPts;  sellScore += rsiPts;  buyReasons += "RSIn "; sellReasons += "RSIn "; componentMask |= (1 << 2); }
-   else if(h1Rsi >= 60 && h1Rsi < 70)   { buyScore += (int)MathFloor(1 * ce2);  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
-   else if(h1Rsi > 30 && h1Rsi <= 40)   { sellScore += (int)MathFloor(1 * ce2);  sellReasons += "RSIs "; componentMask |= (1 << 2); }
+   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += (int)MathFloor(1 * ce2);  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
+   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += (int)MathFloor(1 * ce2);  sellReasons += "RSIs "; componentMask |= (1 << 2); }
 
    // 4. H1 BB（1点）
    int bbSignal = GetBBSignal();
@@ -846,12 +858,12 @@ void OnTick()
       else if(divSignal == -1) { sellScore += (int)MathFloor(2 * ce9);  sellReasons += "DIVv "; componentMask |= (1 << 9); }
    }
 
-   // 11. S/Rレベル（+1/-1点）
+   // SYNC-FIX #6: S/R scoring with penalty (Python: sr=+1 → buy+1/sell-1)
    if(UseSRLevels)
    {
       int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), currentATR);
-      if(srSignal == 1)       { buyScore += (int)MathFloor(1 * ce10);  buyReasons  += "SR^ "; componentMask |= (1 << 10); }
-      else if(srSignal == -1) { sellScore += (int)MathFloor(1 * ce10);  sellReasons += "SRv "; componentMask |= (1 << 10); }
+      if(srSignal == 1)       { buyScore += (int)MathFloor(1 * ce10); sellScore -= (int)MathFloor(1 * ce10); buyReasons  += "SR^ "; componentMask |= (1 << 10); }
+      else if(srSignal == -1) { sellScore += (int)MathFloor(1 * ce10); buyScore -= (int)MathFloor(1 * ce10); sellReasons += "SRv "; componentMask |= (1 << 10); }
    }
 
    // 12. ローソク足パターン（1点）
@@ -914,9 +926,7 @@ void OnTick()
    buyScore = (int)MathMax(0, buyScore);
    sellScore = (int)MathMax(0, sellScore);
 
-   // v10.1: RSI Momentum Confirmation
-   // BUY requires H1 RSI > 50 AND rising over lookback bars
-   // SELL requires H1 RSI < 50 AND falling over lookback bars
+   // SYNC-FIX #9: RSI Momentum - match Python scope (only block the winning side)
    if(UseRSIMomentumConfirm)
    {
       double rsiNow  = GetIndicatorValue(h_h1_rsi, 0, 1);
@@ -924,18 +934,22 @@ void OnTick()
 
       if(rsiNow > 0 && rsiPrev > 0)
       {
-         // Block BUY if RSI not bullish momentum
-         if(buyScore > 0 && !(rsiNow > 50.0 && rsiNow > rsiPrev))
+         // Python: only block the direction that would enter
+         if(buyScore > sellScore)
          {
-            buyScore = 0;
-            buyReasons += "!RSImom ";
+            if(!(rsiNow > 50.0 && rsiNow > rsiPrev))
+            {
+               buyScore = 0;
+               buyReasons += "!RSImom ";
+            }
          }
-
-         // Block SELL if RSI not bearish momentum
-         if(sellScore > 0 && !(rsiNow < 50.0 && rsiNow < rsiPrev))
+         else if(sellScore > buyScore)
          {
-            sellScore = 0;
-            sellReasons += "!RSImom ";
+            if(!(rsiNow < 50.0 && rsiNow < rsiPrev))
+            {
+               sellScore = 0;
+               sellReasons += "!RSImom ";
+            }
          }
       }
    }
@@ -944,6 +958,22 @@ void OnTick()
    if(UseCorrelationCap)
    {
       ApplyCorrelationCap(buyScore, sellScore, componentMask);
+   }
+
+   // SYNC-FIX #4: Score 11 Skip (Python: SKIP_SCORE_11)
+   if(buyScore == 11) buyScore = 0;
+   if(sellScore == 11) sellScore = 0;
+
+   // SYNC-FIX #5: Macro Trend Filter - block counter-trend entries
+   {
+      double h4adx = GetIndicatorValue(h_h4_adx, 0, 1);
+      if(h4adx >= 20.0)
+      {
+         double h4maFast = GetIndicatorValue(h_h4_ma_fast, 0, 1);
+         double h4maSlow = GetIndicatorValue(h_h4_ma_slow, 0, 1);
+         if(h4maFast > h4maSlow) sellScore = 0;  // H4 bullish → block SELL
+         if(h4maFast < h4maSlow) buyScore = 0;   // H4 bearish → block BUY
+      }
    }
 
    // ──── エントリー ────
@@ -1043,17 +1073,18 @@ void OnTick()
    bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
    bool isWithTrend = isBuyWithTrend || isSellWithTrend;
 
+   // SYNC-FIX #8: Only SL adjustment by trend, TP NOT modified (Python has no TP trend adjustment)
    if(h4Slope != 0)
    {
       if(isWithTrend)
       {
          slDist *= Trend_SL_Widen;    // 順トレンド: SL広め（プルバック耐性）
-         tpDist *= Trend_TP_Extend;   // 順トレンド: TP広め（利益伸ばし）
+         // tpDist *= Trend_TP_Extend; // REMOVED: Python doesn't adjust TP by trend
       }
       else
       {
          slDist *= Trend_SL_Tighten;  // 逆トレンド: SL狭め（素早い損切り）
-         tpDist *= Trend_TP_Tighten;  // 逆トレンド: TP狭め（早め利確）
+         // tpDist *= Trend_TP_Tighten; // REMOVED: Python doesn't adjust TP by trend
       }
    }
 
@@ -1094,23 +1125,45 @@ void OnTick()
       }
    }
 
-   // 動的スコア防壁（v9.0: レジーム適応）
+   // SYNC-FIX #2: SRAT (Session-Regime Adaptive Threshold) replaces flat MinEntryScore
    int currentMinScore = regimeMinScore;
+   {
+      MqlDateTime dtSRAT;
+      TimeCurrent(dtSRAT);
+      int gmtHourSRAT = (dtSRAT.hour - GMTOffset + 24) % 24;
+      // Per-hour min_score from Python SRAT_THRESHOLDS
+      switch(gmtHourSRAT)
+      {
+         case 8:  currentMinScore = (int)MathMax(currentMinScore, 7);  break;
+         case 9:  currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 10: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 11: currentMinScore = (int)MathMax(currentMinScore, 99); break;
+         case 12: currentMinScore = (int)MathMax(currentMinScore, 99); break;
+         case 13: currentMinScore = (int)MathMax(currentMinScore, 12); break;
+         case 14: currentMinScore = (int)MathMax(currentMinScore, 11); break;
+         case 15: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 16: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 17: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 18: currentMinScore = (int)MathMax(currentMinScore, 12); break;
+         case 19: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 20: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
+         case 21: currentMinScore = (int)MathMax(currentMinScore, 12); break;
+         default: break; // hours outside 8-21 use regimeMinScore
+      }
+   }
+   // SYNC-FIX #12: DD Escalation 4-level (Python: DD_ESCALATION = [(6,11),(10,13),(15,16),(20,18)])
    if(currentDD >= 20.0) currentMinScore = (int)MathMax(currentMinScore, 18);
-   else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 15);
-   else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 12);
+   else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 16);
+   else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 13);
+   else if(currentDD >= 6.0)  currentMinScore = (int)MathMax(currentMinScore, 11);
    // v4.0: Ranging regime → +3
    if(advRegime == 1) currentMinScore += 3;
 
-   // Legacy ER boost (only when regime adaptive is off)
-   if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold)
-      currentMinScore += RegimeScoreBoost;
+   // SYNC-FIX Additional: Remove ER boost +3 (Python doesn't have this)
+   // REMOVED: Legacy ER boost was: if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold) currentMinScore += RegimeScoreBoost;
 
    // v13.0: Trade quality penalty (MAE/MFE)
    currentMinScore += GetTradeQualityPenalty();
-
-   // v6.0: Score Margin Filter
-   int scoreMargin = UseRegimeAdaptive ? regimeScoreMargin : ScoreMarginMin;
 
    // Apply regime lot scale
    lot = NormalizeDouble(lot * regimeLotScale, 2);
@@ -1149,8 +1202,8 @@ void OnTick()
 
    bool entered = false;
 
-   // CODEX-FIX: NEW CRITICAL #1 - Fix anti-pyramiding: only enter if no positions, or pyramid allowed
-   if((posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && buyScore >= currentMinScore && (buyScore - sellScore) >= scoreMargin)
+   // SYNC-FIX #10: Remove scoreMargin, Python only requires buy > sell
+   if((posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && buyScore >= currentMinScore && buyScore > sellScore)
    {
       // FIX: Issue #6 - Re-fetch ask immediately before execution to avoid stale price
       // CODEX-FIX: NEW HIGH #10 - Recompute SL/TP from refreshed price
@@ -1161,9 +1214,9 @@ void OnTick()
       double tp = NormalizeDouble(ask + tpDistPts * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(ask, sl, tp, true);
-      // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment for exit logic
+      // SYNC-FIX #1: Store entry ATR in comment for BE/Trail/Chandelier calculations
       if(trade.Buy(lot, _Symbol, ask, sl, tp,
-         StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", buyScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
+         StringFormat("GOLD BUY S:%d R:%s|CM=%d|RG=%s|ATR=%.5f", buyScore, g_currentRegime, componentMask, g_currentRegime, currentATR)))
       {
          Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -1172,8 +1225,8 @@ void OnTick()
       }
    }
 
-   // CODEX-FIX: NEW CRITICAL #1 - Fix anti-pyramiding: only enter if no positions, or pyramid allowed
-   if(!entered && (posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && sellScore >= currentMinScore && (sellScore - buyScore) >= scoreMargin)
+   // SYNC-FIX #10: Remove scoreMargin, Python only requires sell > buy
+   if(!entered && (posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && sellScore >= currentMinScore && sellScore > buyScore)
    {
       // FIX: Issue #6 - Re-fetch bid immediately before execution to avoid stale price
       // CODEX-FIX: NEW HIGH #10 - Recompute SL/TP from refreshed price
@@ -1184,9 +1237,9 @@ void OnTick()
       double tp = NormalizeDouble(bid - tpDistPtsSell * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(bid, sl, tp, false);
-      // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment for exit logic
+      // SYNC-FIX #1: Store entry ATR in comment for BE/Trail/Chandelier calculations
       if(trade.Sell(lot, _Symbol, bid, sl, tp,
-         StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", sellScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
+         StringFormat("GOLD SELL S:%d R:%s|CM=%d|RG=%s|ATR=%.5f", sellScore, g_currentRegime, componentMask, g_currentRegime, currentATR)))
       {
          Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -1195,17 +1248,15 @@ void OnTick()
       }
    }
 
-   // v13.0: 段階的リバーサルモード — confidence-scaled lot sizing
-   // Only in non-range, non-crash regimes (matching Python logic)
+   // SYNC-FIX #7: Reversal mode - strict 4/4 AND conditions with fixed 0.5x lot
    if(!entered && posCount == 0 && g_currentRegime != "range" && g_currentRegime != "crash")
    {
       int reversalDir = 0;
       double reversalConfidence = 0.0;
       if(CheckReversal(reversalDir, reversalConfidence))
       {
-         // v13.0: Scale lot by confidence: 2/5=0.2x, 3/5=0.3x, 4/5=0.4x, 5/5=0.5x
-         double revLotScale = reversalConfidence * 0.5;
-         double revLot = NormalizeDouble(lot * revLotScale, 2);
+         // SYNC-FIX #7: Fixed 0.5x lot multiplier (not confidence-based)
+         double revLot = NormalizeDouble(lot * 0.5, 2);
          revLot = MathMax(MinLots, revLot);
 
          // FIX: Issue #26 - Use dedicated reversal SL/TP multipliers for counter-trend entries
@@ -1226,9 +1277,9 @@ void OnTick()
             double tp = NormalizeDouble(ask + revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(ask, sl, tp, true);
-            // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment
+            // SYNC-FIX #1: Store entry ATR in reversal comment
             if(trade.Buy(revLot, _Symbol, ask, sl, tp,
-               StringFormat("GOLD REV-BUY M:%d|CM=%d|RG=%s", componentMask, componentMask, g_currentRegime)))
+               StringFormat("GOLD REV-BUY|CM=%d|RG=%s|ATR=%.5f", componentMask, g_currentRegime, currentATR)))
                Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -1241,9 +1292,9 @@ void OnTick()
             double tp = NormalizeDouble(bid - revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(bid, sl, tp, false);
-            // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment
+            // SYNC-FIX #1: Store entry ATR in reversal comment
             if(trade.Sell(revLot, _Symbol, bid, sl, tp,
-               StringFormat("GOLD REV-SELL M:%d|CM=%d|RG=%s", componentMask, componentMask, g_currentRegime)))
+               StringFormat("GOLD REV-SELL|CM=%d|RG=%s|ATR=%.5f", componentMask, g_currentRegime, currentATR)))
                Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -1848,12 +1899,13 @@ int GetH4RSIAlignment()
 
    if(h4RsiVal == 0 || h1RsiVal == 0) return 0;
 
-   // H4 RSI 50-75 + H1 RSI < 75 → bullish
-   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 75)
+   // SYNC-FIX #11: H4 RSI Alignment boundaries match Python (h1_rsi<70 / h1_rsi>30)
+   // H4 RSI 50-75 + H1 RSI < 70 → bullish
+   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 70)
       return 1;
 
-   // H4 RSI 25-50 + H1 RSI > 25 → bearish
-   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 25)
+   // H4 RSI 25-50 + H1 RSI > 30 → bearish
+   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 30)
       return -1;
 
    return 0;
@@ -2034,12 +2086,16 @@ void ManageOpenPositions()
       double volume    = PositionGetDouble(POSITION_VOLUME);
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
+      // SYNC-FIX #1: Use ENTRY ATR (not current ATR) for BE/Trail/Chandelier
+      string posComment = PositionGetString(POSITION_COMMENT);
+      double entryATR = ParseEntryATR(posComment);
+      if(entryATR <= 0) entryATR = curATR;  // Fallback for old positions without ATR in comment
+
       // v10.0: Regime-adaptive exit parameters
       // CODEX-FIX: NEW HIGH #8 - Use entry regime from trade comment, not current regime
       double partialRatio, beMulti, trailMulti;
       string entryRegime = "";
       if(UseAdaptiveExit) {
-         string posComment = PositionGetString(POSITION_COMMENT);
          entryRegime = ParseRegimeFromComment(posComment);
          if(entryRegime == "") entryRegime = g_currentRegime;  // Fallback for old positions
 
@@ -2054,8 +2110,9 @@ void ManageOpenPositions()
          partialRatio = PartialTP_Ratio; beMulti = BE_ATR_Multi; trailMulti = Trail_ATR_Multi;
       }
 
-      double beDist    = (curATR > 0) ? curATR * beMulti : MathAbs(tp - openPrice) * 0.4;
-      double trailStep = (curATR > 0) ? curATR * trailMulti : MathAbs(tp - openPrice) * 0.3;
+      // SYNC-FIX #1: beDist and trailStep use entryATR
+      double beDist    = (entryATR > 0) ? entryATR * beMulti : MathAbs(tp - openPrice) * 0.4;
+      double trailStep = (entryATR > 0) ? entryATR * trailMulti : MathAbs(tp - openPrice) * 0.3;
 
       if(posType == POSITION_TYPE_BUY)
       {
@@ -2111,8 +2168,8 @@ void ManageOpenPositions()
                trade.PositionModify(ticket, newSL, tp);
          }
 
-         // v3.0: シャンデリアイグジット（BUY）
-         if(UseChandelierExit && curATR > 0 && sl >= openPrice)
+         // SYNC-FIX #1: Chandelier Exit uses entryATR (BUY)
+         if(UseChandelierExit && entryATR > 0 && sl >= openPrice)
          {
             double highestHigh = 0;
             for(int k = 1; k <= Chandelier_Period; k++)
@@ -2120,7 +2177,7 @@ void ManageOpenPositions()
                double hh = iHigh(_Symbol, PERIOD_M15, k);
                if(hh > highestHigh) highestHigh = hh;
             }
-            double chandelierSL = highestHigh - curATR * Chandelier_ATR_Multi;
+            double chandelierSL = highestHigh - entryATR * Chandelier_ATR_Multi;
             chandelierSL = NormalizeDouble(chandelierSL, _Digits);
             if(chandelierSL > sl + 5 * _Point && IsModifySLValid(chandelierSL, true))
                trade.PositionModify(ticket, chandelierSL, tp);
@@ -2207,8 +2264,8 @@ void ManageOpenPositions()
                trade.PositionModify(ticket, newSL, tp);
          }
 
-         // v3.0: シャンデリアイグジット（SELL）
-         if(UseChandelierExit && curATR > 0 && (sl <= openPrice && sl > 0))
+         // SYNC-FIX #1: Chandelier Exit uses entryATR (SELL)
+         if(UseChandelierExit && entryATR > 0 && (sl <= openPrice && sl > 0))
          {
             double lowestLow = DBL_MAX;
             for(int k = 1; k <= Chandelier_Period; k++)
@@ -2216,7 +2273,7 @@ void ManageOpenPositions()
                double ll = iLow(_Symbol, PERIOD_M15, k);
                if(ll < lowestLow) lowestLow = ll;
             }
-            double chandelierSL = lowestLow + curATR * Chandelier_ATR_Multi;
+            double chandelierSL = lowestLow + entryATR * Chandelier_ATR_Multi;
             chandelierSL = NormalizeDouble(chandelierSL, _Digits);
             if(chandelierSL < sl - 5 * _Point && IsModifySLValid(chandelierSL, false))
                trade.PositionModify(ticket, chandelierSL, tp);
@@ -2636,9 +2693,9 @@ int GetVolumeClimax()
 }
 
 //+------------------------------------------------------------------+
-//| v13.0: 段階的リバーサルモード (スコアベース)                       |
-//| Returns direction in reversalDirection, confidence (0.0-1.0) in   |
-//| reversalConfidence. Score-based approach: min 2/5 threshold.      |
+//| SYNC-FIX #7: Reversal mode - Python's strict 4/4 AND conditions  |
+//| Bullish: RSI < 25 AND divergence AND S/R support AND bullish candle |
+//| Bearish: RSI > 75 AND divergence AND S/R resist AND bearish candle  |
 //+------------------------------------------------------------------+
 bool CheckReversal(int &reversalDirection, double &reversalConfidence)
 {
@@ -2648,41 +2705,22 @@ bool CheckReversal(int &reversalDirection, double &reversalConfidence)
    double rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(rsi == 0) return false;
 
-   int revBuy = 0;
-   int revSell = 0;
-
-   // 1. RSI extreme (0-2 pts, graduated)
-   if(rsi < 20)       revBuy += 2;
-   else if(rsi < 30)  revBuy += 1;
-   if(rsi > 80)       revSell += 2;
-   else if(rsi > 70)  revSell += 1;
-
-   // 2. RSI Divergence (0-1 pt)
    int divSignal = GetDivergence();
-   if(divSignal > 0)  revBuy += 1;
-   else if(divSignal < 0) revSell += 1;
-
-   // 3. S/R proximity (0-1 pt)
    int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), GetCurrentATR());
-   if(srSignal > 0)   revBuy += 1;
-   else if(srSignal < 0) revSell += 1;
-
-   // 4. Candle pattern (0-1 pt)
    int candleSignal = GetCandlePattern();
-   if(candleSignal > 0)  revBuy += 1;
-   else if(candleSignal < 0) revSell += 1;
 
-   // Minimum 2/5 threshold (relaxed from 4/4 all-or-nothing)
-   if(revBuy >= ReversalMinScore && revBuy > revSell)
+   // Bullish reversal: RSI < 25 AND divergence AND S/R support AND bullish candle
+   if(rsi < 25.0 && divSignal > 0 && srSignal > 0 && candleSignal > 0)
    {
       reversalDirection = 1;
-      reversalConfidence = (double)revBuy / 5.0;
+      reversalConfidence = 1.0;
       return true;
    }
-   if(revSell >= ReversalMinScore && revSell > revBuy)
+   // Bearish reversal: RSI > 75 AND divergence AND S/R resistance AND bearish candle
+   if(rsi > 75.0 && divSignal < 0 && srSignal < 0 && candleSignal < 0)
    {
       reversalDirection = -1;
-      reversalConfidence = (double)revSell / 5.0;
+      reversalConfidence = 1.0;
       return true;
    }
 
@@ -2702,6 +2740,18 @@ int ParseComponentMaskFromComment(string comment)
    if(nextPipe >= 0)
       cmStr = StringSubstr(cmStr, 0, nextPipe);
    return (int)StringToInteger(cmStr);
+}
+
+// SYNC-FIX #1: Parse entry ATR from trade comment (|ATR=X.XXXXX)
+double ParseEntryATR(string comment)
+{
+   int atrPos = StringFind(comment, "|ATR=");
+   if(atrPos < 0) return 0.0;
+   string atrStr = StringSubstr(comment, atrPos + 5);
+   int nextPipe = StringFind(atrStr, "|");
+   if(nextPipe >= 0)
+      atrStr = StringSubstr(atrStr, 0, nextPipe);
+   return StringToDouble(atrStr);
 }
 
 // CODEX-FIX: NEW HIGH #8 - Parse entry regime from trade comment
