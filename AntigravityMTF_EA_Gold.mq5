@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v12.3: Python v6-v11全機能同期                          |
+//|            v13.0: Multi-scale ER regime + MAE/MFE + Spike detect   |
 //+------------------------------------------------------------------+
 // CODEX-FIX: NEW HIGH #9 - Structural overfit risk documentation
 // This EA uses 47 input parameters and ~200 hardcoded parameters across 15 scoring
@@ -12,9 +12,8 @@
 //   4. Most parameters are hardcoded at WFA-validated defaults to prevent over-optimization
 // Traders should re-run WFA periodically (quarterly) and monitor live vs backtest divergence.
 #property copyright "Antigravity Trading System"
-// REVIEW-FIX: Issue 3.2 - Version string updated to v12.3
-#property version   "12.30"
-#property description "XAUUSD専用 v12.3: 2Dレジーム適応 + セッション×レジーム + 適応出口 + レンジガード + スコアマージン + ATRラチェット"
+#property version   "13.00"
+#property description "XAUUSD専用 v13.0: マルチスケールER + コンポーネント相関キャップ + スパイク検知 + MAE/MFE品質 + 段階的リバーサル"
 
 #include <Trade/Trade.mqh>
 
@@ -138,6 +137,12 @@ const bool   UseAdaptiveExit   = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseRSIMomentumConfirm = true; // HARDCODED: v10.1 WFA検証済みtrue
 const bool   UseV11Range       = true;     // HARDCODED: v11.0 WFA検証済みtrue
 
+// --- v13.0 機能トグル ---
+const bool   UseCorrelationCap    = true;  // HARDCODED: v13.0 コンポーネント相関キャップ
+const bool   UseRealtimeSpike     = true;  // HARDCODED: v13.0 リアルタイムスパイク検知
+const bool   UseMultiscaleRegime  = true;  // HARDCODED: v13.0 マルチスケールレジーム検出
+const bool   UseTradeQuality      = true;  // HARDCODED: v13.0 MAE/MFE品質トラッカー
+
 // --- USD相関フィルター詳細 ---
 const int    Corr_MA_Fast      = 10;       // HARDCODED: Python backtesterと同値
 const int    Corr_MA_Slow      = 30;       // HARDCODED: Python backtesterと同値
@@ -244,6 +249,48 @@ const int    RangeMaxScore      = 15;      // HARDCODED: WFA固定
 const double MacroRangeTPMulti  = 2.5;     // HARDCODED: WFA固定
 const bool   MacroRangePyramid  = false;   // HARDCODED: WFA固定
 
+// --- v13.0 コンポーネント相関キャップ ---
+// Correlated component groups: secondary gets CORRELATION_CAP_RATIO of its points
+// Group 1: trend_alignment = H4 Trend(0, 3pt) + Momentum Burst(12, 3pt)
+// Group 2: rsi_family = H1 RSI(2, 1pt) + H4 RSI Alignment(no CE tracking)
+// Group 3: ma_family = H1 MA(1, 2pt) + M15 MA Cross(4, 2pt)
+const double CorrelationCapRatio  = 0.5;   // HARDCODED: Secondary comp gets 50% points
+
+// --- v13.0 リアルタイムスパイク検知 ---
+const double SpikeATRMulti        = 2.5;   // HARDCODED: Single bar range > ATR x 2.5 = spike
+const int    SpikeCooldownBars    = 8;     // HARDCODED: 8 M15 bars (2 hours) cooldown after spike
+const bool   SpikeCloseLosing     = true;  // HARDCODED: Close losing positions on spike
+
+// --- v13.0 マルチスケールレジーム検出 ---
+const int    RegimeERFast         = 8;     // HARDCODED: H4 8 bars (~32h) short-term ER
+const int    RegimeERSlow         = 40;    // HARDCODED: H4 40 bars (~160h) structural ER
+const int    RegimeStabilityBars  = 3;     // HARDCODED: Consecutive bars for confirmed regime
+const double RegimeTransitionPenalty = 0.7; // HARDCODED: Lot scale during regime transition
+
+// --- v13.0 MAE/MFE品質トラッカー ---
+const int    TQTradeCount         = 50;    // HARDCODED: Track last 50 trades for quality
+const int    TQMinTrades          = 15;    // HARDCODED: Min trades before quality filtering
+const double TQMAEThreshold       = 0.7;   // HARDCODED: MAE > 70% of SL = bad entry
+const double TQBadEntryLimit      = 0.5;   // HARDCODED: If >50% bad entries, raise MIN_SCORE
+const int    TQScorePenalty       = 1;     // HARDCODED: MIN_SCORE += 1 when entry quality poor
+
+// --- v13.0 段階的リバーサル ---
+const int    ReversalMinScore     = 2;     // HARDCODED: Minimum 2/5 reversal score threshold
+
+// --- v13.0 trend_weak レジームプロファイル ---
+const int    TrendWeakMinScore    = 10;    // HARDCODED: trend_weak最低スコア
+const double TrendWeakSLMulti     = 1.3;   // HARDCODED: trend_weak SL倍率
+const double TrendWeakTPMulti     = 2.5;   // HARDCODED: trend_weak TP倍率
+const double TrendWeakLotScale    = 0.8;   // HARDCODED: trend_weak ロットスケール
+const int    TrendWeakCooldown    = 16;    // HARDCODED: trend_weak クールダウン
+
+// --- v13.0 high_vol_trend/high_vol_range レジームプロファイル ---
+const double HVTrendLotScale      = 0.4;   // HARDCODED: high_vol_trend ロットスケール
+const int    HVRangeMinScore      = 14;    // HARDCODED: high_vol_range 最低スコア
+const double HVRangeSLMulti       = 1.5;   // HARDCODED: high_vol_range SL倍率
+const double HVRangeTPMulti       = 2.0;   // HARDCODED: high_vol_range TP倍率
+const double HVRangeLotScale      = 0.25;  // HARDCODED: high_vol_range ロットスケール
+
 // --- v12.1 動的コンポーネント有効性 ---
 const bool   UseDynamicComponentScoring = true;   // HARDCODED: WFA検証済みtrue
 const int    CompEffectMinTrades        = 10;     // HARDCODED: WFA固定
@@ -295,6 +342,26 @@ int            g_compTotal[COMP_COUNT];    // total trades per component
 ulong          g_trackPosIDs[COMP_TRACK_MAX];   // position IDs
 int            g_trackMasks[COMP_TRACK_MAX];     // component masks at entry
 int            g_trackCount;
+
+// v13.0: Multi-scale ER regime globals
+double         g_fastER;             // H4 fast ER (8-period)
+double         g_slowER;             // H4 slow ER (40-period)
+string         g_detailedRegime;     // v13.0 detailed regime string
+int            g_regimeStableCount;  // Consecutive bars same regime
+string         g_lastStableRegime;   // Last detected regime
+bool           g_regimeConfirmed;    // Regime stability confirmed
+datetime       g_regimeTransitionTime; // Time of last regime change
+double         g_regimeTransitionMult; // Lot multiplier during transition
+
+// v13.0: Spike detection globals
+datetime       g_spikeCooldownUntil; // M15 bar time after which spike cooldown ends
+int            g_spikeBlocks;        // Count of spike blocks
+
+// v13.0: MAE/MFE Trade Quality tracker
+#define TQ_MAX 50
+double         g_tqMAERatios[TQ_MAX]; // MAE / SL_distance for recent trades
+int            g_tqCount;             // Number of entries in MAE buffer
+int            g_tqIndex;             // Current write position (circular)
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -453,8 +520,26 @@ int OnInit()
    g_trackCount = 0;
    LoadComponentStats();
 
-   // REVIEW-FIX: Issue 3.2 - Version string updated to v12.3
-   Print("AntigravityMTF EA [GOLD] v12.3 初期化完了");
+   // v13.0: Multi-scale ER初期化
+   g_fastER = 0.5;
+   g_slowER = 0.5;
+   g_detailedRegime = "trend";
+   g_regimeStableCount = 0;
+   g_lastStableRegime = "trend";
+   g_regimeConfirmed = true;
+   g_regimeTransitionTime = 0;
+   g_regimeTransitionMult = 1.0;
+
+   // v13.0: Spike detection初期化
+   g_spikeCooldownUntil = 0;
+   g_spikeBlocks = 0;
+
+   // v13.0: MAE/MFE品質トラッカー初期化
+   ArrayInitialize(g_tqMAERatios, 0.0);
+   g_tqCount = 0;
+   g_tqIndex = 0;
+
+   Print("AntigravityMTF EA [GOLD] v13.0 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
@@ -472,6 +557,10 @@ int OnInit()
    Print("   v12.1: DynamicCompScoring=", (UseDynamicComponentScoring ? "有効" : "無効"),
          " MinTrades=", CompEffectMinTrades,
          " BoostWR>=", DoubleToString(CompEffectBoostWR*100, 0), "% PenaltyWR<=", DoubleToString(CompEffectPenaltyWR*100, 0), "%");
+   Print("   v13.0: MultiscaleER=", (UseMultiscaleRegime ? "有効" : "無効"),
+         " CorrelationCap=", (UseCorrelationCap ? "有効" : "無効"),
+         " SpikeDetect=", (UseRealtimeSpike ? "有効" : "無効"),
+         " TradeQuality=", (UseTradeQuality ? "有効" : "無効"));
    return INIT_SUCCEEDED;
 }
 
@@ -541,6 +630,22 @@ void OnTick()
    if(!CheckTimeFilter()) return;
    if(!CheckSpread()) return;
 
+   // v13.0: Realtime volatility spike detection
+   if(UseRealtimeSpike)
+   {
+      double spikeATR = GetCurrentATR();
+      if(spikeATR > 0 && DetectRealtimeSpike(spikeATR))
+      {
+         g_spikeBlocks++;
+         g_spikeCooldownUntil = currentBar + SpikeCooldownBars * PeriodSeconds(PERIOD_M15);
+         // Close losing positions immediately on spike
+         if(SpikeCloseLosing) CloseLosingSpikePositions();
+         return;
+      }
+      // Spike cooldown
+      if(currentBar < g_spikeCooldownUntil) return;
+   }
+
    // v4.0: ニュースフィルター
    if(IsNewsTime()) return;
 
@@ -588,12 +693,36 @@ void OnTick()
    double avgATR = GetAverageATR();
    g_volRatio = (avgATR > 0) ? currentATR / avgATR : 1.0;
 
-   // v9.0: 2D Regime Classification
+   // v13.0: Multi-scale ER computation
+   if(UseMultiscaleRegime)
+   {
+      g_fastER = CalcERForPeriod(RegimeERFast);
+      g_slowER = CalcERForPeriod(RegimeERSlow);
+   }
+
+   // v9.0/v13.0: Regime Classification
    if(UseRegimeAdaptive) {
-      g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
+      if(UseMultiscaleRegime)
+      {
+         g_detailedRegime = DetectRegimeV13(g_fastER, h4_er, g_slowER, g_volRatio);
+         UpdateRegimeStability(g_detailedRegime);
+         // Map detailed regime to base regime for backward compatibility
+         if(g_detailedRegime == "trend_strong" || g_detailedRegime == "trend_weak")
+            g_currentRegime = "trend";
+         else if(g_detailedRegime == "high_vol_trend" || g_detailedRegime == "high_vol_range")
+            g_currentRegime = "high_vol";
+         else
+            g_currentRegime = g_detailedRegime;
+      }
+      else
+      {
+         g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
+         g_detailedRegime = g_currentRegime;
+      }
       if(g_currentRegime == "crash") return; // No trading in crash
    } else {
       g_currentRegime = "trend";
+      g_detailedRegime = "trend";
    }
 
    // v11.0: Macro ER
@@ -807,30 +936,67 @@ void OnTick()
       }
    }
 
+   // v13.0: Component Correlation Cap - reduce double-counting from correlated components
+   if(UseCorrelationCap)
+   {
+      ApplyCorrelationCap(buyScore, sellScore, componentMask);
+   }
+
    // ──── エントリー ────
    // FIX: Issue #6 - ask/bid for SL/TP calculation only; re-fetched before execution
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // v9.0: Regime-specific SL/TP
+   // v9.0/v13.0: Regime-specific SL/TP (v13.0 uses detailed regime for finer control)
    double slMulti, tpMulti, regimeLotScale;
    int regimeMinScore, regimeScoreMargin, regimeCooldown;
    bool regimeAllowPyramid;
 
    if(UseRegimeAdaptive) {
-      if(g_currentRegime == "trend") {
-         slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
-         regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
-         regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
-         if(g_volRatio >= 1.2) slMulti += 0.3;
-      } else if(g_currentRegime == "range") {
-         slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
-         regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
-         regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
-      } else { // high_vol
-         slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HighVolLotScale;
-         regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
-         regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+      if(UseMultiscaleRegime) {
+         // v13.0: Use detailed regime for finer profile selection
+         if(g_detailedRegime == "trend_strong") {
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+            if(g_volRatio >= 1.2) slMulti += 0.3;
+         } else if(g_detailedRegime == "trend_weak") {
+            slMulti = TrendWeakSLMulti; tpMulti = TrendWeakTPMulti; regimeLotScale = TrendWeakLotScale;
+            regimeMinScore = TrendWeakMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendWeakCooldown; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "range") {
+            slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
+            regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
+            regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "high_vol_trend") {
+            slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HVTrendLotScale;
+            regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "high_vol_range") {
+            slMulti = HVRangeSLMulti; tpMulti = HVRangeTPMulti; regimeLotScale = HVRangeLotScale;
+            regimeMinScore = HVRangeMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         } else { // fallback to base regime
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+         }
+      } else {
+         // Legacy v9.0 regime selection
+         if(g_currentRegime == "trend") {
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+            if(g_volRatio >= 1.2) slMulti += 0.3;
+         } else if(g_currentRegime == "range") {
+            slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
+            regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
+            regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
+         } else { // high_vol
+            slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HighVolLotScale;
+            regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         }
       }
    } else {
       slMulti = SL_ATR_Multi;
@@ -936,12 +1102,22 @@ void OnTick()
    if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold)
       currentMinScore += RegimeScoreBoost;
 
+   // v13.0: Trade quality penalty (MAE/MFE)
+   currentMinScore += GetTradeQualityPenalty();
+
    // v6.0: Score Margin Filter
    int scoreMargin = UseRegimeAdaptive ? regimeScoreMargin : ScoreMarginMin;
 
    // Apply regime lot scale
    lot = NormalizeDouble(lot * regimeLotScale, 2);
    lot = MathMax(MinLots, lot);
+
+   // v13.0: Regime transition lot penalty
+   if(UseMultiscaleRegime)
+   {
+      lot = NormalizeDouble(lot * g_regimeTransitionMult, 2);
+      lot = MathMax(MinLots, lot);
+   }
 
    // v10.0: Session-Regime lot modifier
    double sessLotMod = GetSessionLotModifier(g_currentSession, g_currentRegime);
@@ -985,7 +1161,7 @@ void OnTick()
       if(trade.Buy(lot, _Symbol, ask, sl, tp,
          StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", buyScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
       {
-         Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
+         Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                isPyramid ? " [PYRAMID]" : "", " [", buyReasons, "]");
          entered = true;
@@ -1008,20 +1184,24 @@ void OnTick()
       if(trade.Sell(lot, _Symbol, bid, sl, tp,
          StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", sellScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
       {
-         Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
+         Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                isPyramid ? " [PYRAMID]" : "", " [", sellReasons, "]");
          entered = true;
       }
    }
 
-   // v4.0: リバーサルモード — 通常スコア不足時にカウンタートレンド
-   if(!entered && posCount == 0)
+   // v13.0: 段階的リバーサルモード — confidence-scaled lot sizing
+   // Only in non-range, non-crash regimes (matching Python logic)
+   if(!entered && posCount == 0 && g_currentRegime != "range" && g_currentRegime != "crash")
    {
       int reversalDir = 0;
-      if(CheckReversal(reversalDir))
+      double reversalConfidence = 0.0;
+      if(CheckReversal(reversalDir, reversalConfidence))
       {
-         double revLot = NormalizeDouble(lot * 0.5, 2);
+         // v13.0: Scale lot by confidence: 2/5=0.2x, 3/5=0.3x, 4/5=0.4x, 5/5=0.5x
+         double revLotScale = reversalConfidence * 0.5;
+         double revLot = NormalizeDouble(lot * revLotScale, 2);
          revLot = MathMax(MinLots, revLot);
 
          // FIX: Issue #26 - Use dedicated reversal SL/TP multipliers for counter-trend entries
@@ -2203,6 +2383,48 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
             totalTradesTracked++;
 
+            // v13.0: Record MAE/MFE trade quality metric
+            // Approximate MAE from SL hit: if deal closed by SL, MAE ≈ SL distance (ratio ~1.0)
+            // For TP or trailing exits, MAE = how far against position went.
+            // We use the loss magnitude relative to entry SL distance as a proxy.
+            if(UseTradeQuality)
+            {
+               double dealVolume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+               if(dealVolume > 0)
+               {
+                  double dealPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+                  // Look up entry deal in this position's history to find SL distance
+                  // Simplified: use netResult to approximate entry quality
+                  // Bad entry = large loss relative to expected risk
+                  double currentATR_tq = GetCurrentATR();
+                  if(currentATR_tq > 0)
+                  {
+                     // For SL-exited trades, the loss is approximately the SL distance
+                     // MAE ratio = |loss per pt| / (ATR * SL_ATR_Multi)
+                     double expectedSLDist = currentATR_tq * SL_ATR_Multi;
+                     double maeRatio = 0;
+                     if(dealReason == DEAL_REASON_SL && expectedSLDist > 0)
+                        maeRatio = 1.0; // Hit SL = MAE reached full SL
+                     else if(netResult < 0 && expectedSLDist > 0)
+                     {
+                        // Partial loss: estimate MAE ratio
+                        double lossPerLot = MathAbs(netResult / dealVolume);
+                        double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                        if(contractSize > 0)
+                        {
+                           double lossPts = lossPerLot / contractSize / _Point;
+                           double slPts = expectedSLDist / _Point;
+                           maeRatio = (slPts > 0) ? lossPts / slPts : 0;
+                        }
+                     }
+                     // Winning trades: MAE < SL, estimate conservatively
+                     else if(netResult >= 0)
+                        maeRatio = 0.3; // Assumed low MAE for winners
+                     RecordTradeQuality(maeRatio);
+                  }
+               }
+            }
+
             // v12.1: Update component effectiveness stats
             if(UseDynamicComponentScoring)
             {
@@ -2410,30 +2632,53 @@ int GetVolumeClimax()
 }
 
 //+------------------------------------------------------------------+
-//| v4.0: リバーサルモード (カウンタートレンド)                         |
+//| v13.0: 段階的リバーサルモード (スコアベース)                       |
+//| Returns direction in reversalDirection, confidence (0.0-1.0) in   |
+//| reversalConfidence. Score-based approach: min 2/5 threshold.      |
 //+------------------------------------------------------------------+
-bool CheckReversal(int &reversalDirection)
+bool CheckReversal(int &reversalDirection, double &reversalConfidence)
 {
    if(!UseReversalMode) return false;
+   reversalConfidence = 0.0;
 
    double rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(rsi == 0) return false;
 
-   int divSignal = GetDivergence();
-   int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), GetCurrentATR());
-   int candleSignal = GetCandlePattern();
+   int revBuy = 0;
+   int revSell = 0;
 
-   // Bullish reversal: RSI oversold + bullish divergence + support + bullish candle
-   if(rsi < 25 && divSignal > 0 && srSignal > 0 && candleSignal > 0)
+   // 1. RSI extreme (0-2 pts, graduated)
+   if(rsi < 20)       revBuy += 2;
+   else if(rsi < 30)  revBuy += 1;
+   if(rsi > 80)       revSell += 2;
+   else if(rsi > 70)  revSell += 1;
+
+   // 2. RSI Divergence (0-1 pt)
+   int divSignal = GetDivergence();
+   if(divSignal > 0)  revBuy += 1;
+   else if(divSignal < 0) revSell += 1;
+
+   // 3. S/R proximity (0-1 pt)
+   int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), GetCurrentATR());
+   if(srSignal > 0)   revBuy += 1;
+   else if(srSignal < 0) revSell += 1;
+
+   // 4. Candle pattern (0-1 pt)
+   int candleSignal = GetCandlePattern();
+   if(candleSignal > 0)  revBuy += 1;
+   else if(candleSignal < 0) revSell += 1;
+
+   // Minimum 2/5 threshold (relaxed from 4/4 all-or-nothing)
+   if(revBuy >= ReversalMinScore && revBuy > revSell)
    {
       reversalDirection = 1;
+      reversalConfidence = (double)revBuy / 5.0;
       return true;
    }
-
-   // Bearish reversal: RSI overbought + bearish divergence + resistance + bearish candle
-   if(rsi > 75 && divSignal < 0 && srSignal < 0 && candleSignal < 0)
+   if(revSell >= ReversalMinScore && revSell > revBuy)
    {
       reversalDirection = -1;
+      reversalConfidence = (double)revSell / 5.0;
       return true;
    }
 
@@ -2577,6 +2822,221 @@ bool IsModifySLValid(double newSL, bool isBuy)
    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double dist = isBuy ? (price - newSL) : (newSL - price);
    return (dist >= minDist);
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: ER計算（指定期間）                                          |
+//+------------------------------------------------------------------+
+double CalcERForPeriod(int period)
+{
+   double h4CloseArr[];
+   ArraySetAsSeries(h4CloseArr, true);
+   // Use shift 1 (confirmed H4 bar) for consistency
+   if(CopyClose(_Symbol, PERIOD_H4, 1, period + 1, h4CloseArr) < period + 1)
+      return 0.5; // Default neutral ER
+   double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[period]);
+   double sumAbsChanges = 0;
+   for(int k = 0; k < period; k++)
+      sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+   if(sumAbsChanges <= 0) return 0;
+   return netChange / sumAbsChanges;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: マルチスケール3層ERレジーム分類                              |
+//| fast/med/slow ERで詳細レジーム: crash, high_vol_trend,             |
+//| high_vol_range, trend_strong, trend_weak, range                    |
+//+------------------------------------------------------------------+
+string DetectRegimeV13(double fast_er, double med_er, double slow_er, double vol_ratio)
+{
+   if(vol_ratio >= RegimeVolCrash) return "crash";
+
+   bool isTrendingFast = (fast_er >= 0.3);
+   bool isTrendingMed  = (med_er >= 0.3);
+   bool isHighVol      = (vol_ratio >= RegimeVolHigh);
+
+   if(isHighVol)
+   {
+      if(isTrendingFast) return "high_vol_trend";
+      return "high_vol_range";
+   }
+
+   if(isTrendingFast && isTrendingMed) return "trend_strong";
+   if(isTrendingFast && !isTrendingMed) return "trend_weak";
+
+   return "range";
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: レジーム安定性追跡                                          |
+//+------------------------------------------------------------------+
+void UpdateRegimeStability(string newRegime)
+{
+   if(!UseMultiscaleRegime) return;
+
+   // Map v13 regimes to base regimes for stability check
+   string baseNew = MapToBaseRegime(newRegime);
+   string baseLast = MapToBaseRegime(g_lastStableRegime);
+
+   if(baseNew == baseLast)
+   {
+      g_regimeStableCount++;
+   }
+   else
+   {
+      g_regimeStableCount = 1;
+      g_regimeTransitionTime = TimeCurrent();
+   }
+
+   g_lastStableRegime = newRegime;
+   g_regimeConfirmed = (g_regimeStableCount >= RegimeStabilityBars);
+
+   // Calculate transition lot multiplier
+   double hoursSince = (double)(TimeCurrent() - g_regimeTransitionTime) / 3600.0;
+   if(hoursSince < 3.0) // 12 M15 bars = 3 hours
+      g_regimeTransitionMult = RegimeTransitionPenalty;
+   else
+      g_regimeTransitionMult = 1.0;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: 詳細レジームをベースレジームにマッピング                     |
+//+------------------------------------------------------------------+
+string MapToBaseRegime(string regime)
+{
+   if(regime == "trend_strong" || regime == "trend_weak") return "trend";
+   if(regime == "high_vol_trend" || regime == "high_vol_range") return "high_vol";
+   return regime; // "range", "crash" - unchanged
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: リアルタイムスパイク検知                                     |
+//+------------------------------------------------------------------+
+bool DetectRealtimeSpike(double currentATR)
+{
+   if(!UseRealtimeSpike || currentATR <= 0) return false;
+
+   // Check current M15 bar range
+   double barHigh  = iHigh(_Symbol, PERIOD_M15, 0);
+   double barLow   = iLow(_Symbol, PERIOD_M15, 0);
+   double barRange = barHigh - barLow;
+
+   if(barRange > currentATR * SpikeATRMulti) return true;
+
+   // 2-bar combined range check (catches gap moves)
+   double prevHigh = iHigh(_Symbol, PERIOD_M15, 1);
+   double prevLow  = iLow(_Symbol, PERIOD_M15, 1);
+   double twoBarHigh = MathMax(barHigh, prevHigh);
+   double twoBarLow  = MathMin(barLow, prevLow);
+   double twoBarRange = twoBarHigh - twoBarLow;
+
+   if(twoBarRange > currentATR * SpikeATRMulti * 1.5) return true;
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: スパイク時に損失ポジションを即座にクローズ                   |
+//+------------------------------------------------------------------+
+void CloseLosingSpikePositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetDouble(POSITION_PROFIT) < 0)
+      {
+         trade.PositionClose(ticket);
+         Print("v13.0: Spike detected - closed losing position ticket=", ticket);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: コンポーネント相関キャップ適用                               |
+//| Correlated component groups get reduced to avoid double-counting  |
+//+------------------------------------------------------------------+
+void ApplyCorrelationCap(int &buyScore, int &sellScore, int componentMask)
+{
+   // Group 1: trend_alignment = H4 Trend(bit 0, 3pt) + Momentum Burst(bit 12, 3pt)
+   // H4 Trend is stronger (has ADX filter), so Burst is secondary
+   {
+      bool h4Fired   = (componentMask & (1 << 0)) != 0;
+      bool burstFired = (componentMask & (1 << 12)) != 0;
+      if(h4Fired && burstFired)
+      {
+         // Reduce Momentum Burst by 50% (3 * 0.5 = 1.5, floored to 1)
+         int reduction = (int)(3.0 * CorrelationCapRatio);
+         // Determine burst direction from componentMask
+         // If H4 and Burst are same direction, reduce
+         bool h4Buy = (componentMask & (1 << 16)) != 0;
+         // Burst follows same direction (all TFs aligned), reduce the score
+         if(h4Buy)
+            buyScore -= reduction;
+         else
+            sellScore -= reduction;
+      }
+   }
+
+   // Group 2: rsi_family = H1 RSI(bit 2, 1pt) + H4 RSI (no bit, skip)
+   // H4 RSI has no CE tracking bit, so cannot detect overlap reliably. Skip.
+
+   // Group 3: ma_family = H1 MA(bit 1, 2pt) + M15 MA Cross(bit 4, 2pt)
+   {
+      bool h1maFired  = (componentMask & (1 << 1)) != 0;
+      bool m15maFired = (componentMask & (1 << 4)) != 0;
+      if(h1maFired && m15maFired)
+      {
+         // M15 MA Cross is secondary (shorter TF), reduce by 50% = 1pt
+         int reduction = (int)(2.0 * CorrelationCapRatio);
+         // Determine M15 direction - if H1 MA is buy, M15 likely same
+         // We can't easily distinguish direction per component in the bitmask,
+         // so apply to the winning side
+         if(buyScore >= sellScore)
+            buyScore -= reduction;
+         else
+            sellScore -= reduction;
+      }
+   }
+
+   // Clamp to 0
+   buyScore  = (int)MathMax(0, buyScore);
+   sellScore = (int)MathMax(0, sellScore);
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: MAE/MFEベースのエントリー品質ペナルティ                     |
+//+------------------------------------------------------------------+
+int GetTradeQualityPenalty()
+{
+   if(!UseTradeQuality) return 0;
+   if(g_tqCount < TQMinTrades) return 0;
+
+   // Calculate ratio of bad entries (MAE > threshold of SL)
+   int badEntries = 0;
+   int total = MathMin(g_tqCount, TQ_MAX);
+   for(int i = 0; i < total; i++)
+   {
+      if(g_tqMAERatios[i] > TQMAEThreshold)
+         badEntries++;
+   }
+   double badRatio = (double)badEntries / (double)total;
+   if(badRatio > TQBadEntryLimit)
+      return TQScorePenalty;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: MAE/MFE品質トラッカーに記録                                 |
+//+------------------------------------------------------------------+
+void RecordTradeQuality(double maeRatio)
+{
+   if(!UseTradeQuality) return;
+   g_tqMAERatios[g_tqIndex] = maeRatio;
+   g_tqIndex = (g_tqIndex + 1) % TQ_MAX;
+   if(g_tqCount < TQ_MAX) g_tqCount++;
 }
 
 //+------------------------------------------------------------------+
