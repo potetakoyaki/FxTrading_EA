@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v14.0: Python backtester sync (13 critical fixes)       |
+//|            v14.1: Fix entry ATR storage via GlobalVariable         |
 //+------------------------------------------------------------------+
 // CODEX-FIX: NEW HIGH #9 - Structural overfit risk documentation
 // This EA uses 47 input parameters and ~200 hardcoded parameters across 15 scoring
@@ -12,8 +12,8 @@
 //   4. Most parameters are hardcoded at WFA-validated defaults to prevent over-optimization
 // Traders should re-run WFA periodically (quarterly) and monitor live vs backtest divergence.
 #property copyright "Antigravity Trading System"
-#property version   "14.00"
-#property description "XAUUSD専用 v14.0: Python backtester完全同期 (13 critical fixes)"
+#property version   "14.10"
+#property description "XAUUSD専用 v14.1: Entry ATR/Regime stored in GlobalVariable (comment truncation fix)"
 
 #include <Trade/Trade.mqh>
 
@@ -367,6 +367,11 @@ double         g_tqMAERatios[TQ_MAX]; // MAE / SL_distance for recent trades
 int            g_tqCount;             // Number of entries in MAE buffer
 int            g_tqIndex;             // Current write position (circular)
 
+// v14.1: Pending entry ATR/Regime for OnTradeTransaction to store in GlobalVariable
+// Set before trade.Buy()/Sell(), consumed in OnTradeTransaction(DEAL_ENTRY_IN)
+double         g_pendingEntryATR;     // ATR at entry time
+string         g_pendingEntryRegime;  // Regime at entry time
+
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
 //+------------------------------------------------------------------+
@@ -543,7 +548,7 @@ int OnInit()
    g_tqCount = 0;
    g_tqIndex = 0;
 
-   Print("AntigravityMTF EA [GOLD] v14.0 初期化完了");
+   Print("AntigravityMTF EA [GOLD] v14.1 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
@@ -1214,9 +1219,12 @@ void OnTick()
       double tp = NormalizeDouble(ask + tpDistPts * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(ask, sl, tp, true);
-      // SYNC-FIX #1: Store entry ATR in comment for BE/Trail/Chandelier calculations
+      // v14.1: Set pending ATR/Regime before trade call (consumed in OnTradeTransaction)
+      g_pendingEntryATR = currentATR;
+      g_pendingEntryRegime = g_currentRegime;
+      // v14.1: Short comment (MT5 truncates at ~31 chars), ATR/Regime stored in GlobalVariable
       if(trade.Buy(lot, _Symbol, ask, sl, tp,
-         StringFormat("GOLD BUY S:%d R:%s|CM=%d|RG=%s|ATR=%.5f", buyScore, g_currentRegime, componentMask, g_currentRegime, currentATR)))
+         StringFormat("GOLD BUY S:%d|CM=%d", buyScore, componentMask)))
       {
          Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -1237,9 +1245,12 @@ void OnTick()
       double tp = NormalizeDouble(bid - tpDistPtsSell * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(bid, sl, tp, false);
-      // SYNC-FIX #1: Store entry ATR in comment for BE/Trail/Chandelier calculations
+      // v14.1: Set pending ATR/Regime before trade call (consumed in OnTradeTransaction)
+      g_pendingEntryATR = currentATR;
+      g_pendingEntryRegime = g_currentRegime;
+      // v14.1: Short comment (MT5 truncates at ~31 chars), ATR/Regime stored in GlobalVariable
       if(trade.Sell(lot, _Symbol, bid, sl, tp,
-         StringFormat("GOLD SELL S:%d R:%s|CM=%d|RG=%s|ATR=%.5f", sellScore, g_currentRegime, componentMask, g_currentRegime, currentATR)))
+         StringFormat("GOLD SELL S:%d|CM=%d", sellScore, componentMask)))
       {
          Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -1277,9 +1288,12 @@ void OnTick()
             double tp = NormalizeDouble(ask + revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(ask, sl, tp, true);
-            // SYNC-FIX #1: Store entry ATR in reversal comment
+            // v14.1: Set pending ATR/Regime before trade call
+            g_pendingEntryATR = currentATR;
+            g_pendingEntryRegime = g_currentRegime;
+            // v14.1: Short comment, ATR/Regime stored in GlobalVariable via OnTradeTransaction
             if(trade.Buy(revLot, _Symbol, ask, sl, tp,
-               StringFormat("GOLD REV-BUY|CM=%d|RG=%s|ATR=%.5f", componentMask, g_currentRegime, currentATR)))
+               StringFormat("GOLD REV-BUY|CM=%d", componentMask)))
                Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -1292,9 +1306,12 @@ void OnTick()
             double tp = NormalizeDouble(bid - revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(bid, sl, tp, false);
-            // SYNC-FIX #1: Store entry ATR in reversal comment
+            // v14.1: Set pending ATR/Regime before trade call
+            g_pendingEntryATR = currentATR;
+            g_pendingEntryRegime = g_currentRegime;
+            // v14.1: Short comment, ATR/Regime stored in GlobalVariable via OnTradeTransaction
             if(trade.Sell(revLot, _Symbol, bid, sl, tp,
-               StringFormat("GOLD REV-SELL|CM=%d|RG=%s|ATR=%.5f", componentMask, g_currentRegime, currentATR)))
+               StringFormat("GOLD REV-SELL|CM=%d", componentMask)))
                Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -2086,17 +2103,16 @@ void ManageOpenPositions()
       double volume    = PositionGetDouble(POSITION_VOLUME);
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
-      // SYNC-FIX #1: Use ENTRY ATR (not current ATR) for BE/Trail/Chandelier
-      string posComment = PositionGetString(POSITION_COMMENT);
-      double entryATR = ParseEntryATR(posComment);
-      if(entryATR <= 0) entryATR = curATR;  // Fallback for old positions without ATR in comment
+      // v14.1: Read entry ATR from GlobalVariable (immune to MT5 comment truncation)
+      double entryATR = ReadEntryATR(ticket);
+      if(entryATR <= 0) entryATR = curATR;  // Fallback for positions without stored ATR
 
       // v10.0: Regime-adaptive exit parameters
-      // CODEX-FIX: NEW HIGH #8 - Use entry regime from trade comment, not current regime
+      // v14.1: Read entry regime from GlobalVariable instead of trade comment
       double partialRatio, beMulti, trailMulti;
       string entryRegime = "";
       if(UseAdaptiveExit) {
-         entryRegime = ParseRegimeFromComment(posComment);
+         entryRegime = ReadEntryRegime(ticket);
          if(entryRegime == "") entryRegime = g_currentRegime;  // Fallback for old positions
 
          if(entryRegime == "trend") {
@@ -2398,6 +2414,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   g_trackMasks[idx]  = cmMask;
                   g_trackCount++;
                }
+
+               // v14.1: Store entry ATR and regime in GlobalVariable keyed by position ticket
+               // This is immune to MT5's ~31 char comment truncation
+               if(g_pendingEntryATR > 0)
+               {
+                  StoreEntryATR(posID, g_pendingEntryATR);
+                  StoreEntryRegime(posID, g_pendingEntryRegime);
+                  g_pendingEntryATR = 0;
+                  g_pendingEntryRegime = "";
+               }
             }
          }
 
@@ -2411,6 +2437,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                return;
             }
             // Position gone = full close, record statistics below
+
+            // v14.1: Clean up entry ATR/Regime GlobalVariables
+            CleanupEntryATR(posID_out);
+            CleanupEntryRegime(posID_out);
 
             // SLクールダウン
             if(dealReason == DEAL_REASON_SL)
@@ -2755,6 +2785,7 @@ double ParseEntryATR(string comment)
 }
 
 // CODEX-FIX: NEW HIGH #8 - Parse entry regime from trade comment
+// v14.1: DEPRECATED - Regime now stored in GlobalVariable, but kept for backward compat
 string ParseRegimeFromComment(string comment)
 {
    int rgPos = StringFind(comment, "|RG=");
@@ -2764,6 +2795,83 @@ string ParseRegimeFromComment(string comment)
    if(nextPipe >= 0)
       rgStr = StringSubstr(rgStr, 0, nextPipe);
    return rgStr;
+}
+
+//+------------------------------------------------------------------+
+//| v14.1: Entry ATR — GlobalVariable storage (immune to comment      |
+//|        truncation at ~31 chars)                                    |
+//+------------------------------------------------------------------+
+void StoreEntryATR(ulong posTicket, double atr)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   GlobalVariableSet(key, atr);
+}
+
+double ReadEntryATR(ulong posTicket)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   if(GlobalVariableCheck(key))
+      return GlobalVariableGet(key);
+   return 0.0;
+}
+
+void CleanupEntryATR(ulong posTicket)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   GlobalVariableDel(key);
+}
+
+//+------------------------------------------------------------------+
+//| v14.1: Entry Regime — GlobalVariable storage                       |
+//|        Encoded as double: 1=trend, 2=range, 3=high_vol, 4=crash   |
+//|        5=trend_weak, 6=hv_trend, 7=hv_range                       |
+//+------------------------------------------------------------------+
+double RegimeToDouble(string regime)
+{
+   if(regime == "trend")      return 1.0;
+   if(regime == "range")      return 2.0;
+   if(regime == "high_vol")   return 3.0;
+   if(regime == "crash")      return 4.0;
+   if(regime == "trend_weak") return 5.0;
+   if(regime == "hv_trend")   return 6.0;
+   if(regime == "hv_range")   return 7.0;
+   return 0.0;  // unknown
+}
+
+string DoubleToRegime(double val)
+{
+   int v = (int)MathRound(val);
+   switch(v)
+   {
+      case 1: return "trend";
+      case 2: return "range";
+      case 3: return "high_vol";
+      case 4: return "crash";
+      case 5: return "trend_weak";
+      case 6: return "hv_trend";
+      case 7: return "hv_range";
+      default: return "";
+   }
+}
+
+void StoreEntryRegime(ulong posTicket, string regime)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   GlobalVariableSet(key, RegimeToDouble(regime));
+}
+
+string ReadEntryRegime(ulong posTicket)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   if(GlobalVariableCheck(key))
+      return DoubleToRegime(GlobalVariableGet(key));
+   return "";
+}
+
+void CleanupEntryRegime(ulong posTicket)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   GlobalVariableDel(key);
 }
 
 //+------------------------------------------------------------------+
