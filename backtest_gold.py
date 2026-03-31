@@ -226,7 +226,7 @@ class GoldConfig:
     # Component bonuses: BB Bounce(+1), S/R(+1), RSI Divergence(+1), Channel(+1)
     RANGE_COMPONENT_BONUS = {3: 1, 10: 1, 9: 1, 5: 1}
     # Mean-reversion specific
-    RANGE_MR_ENABLED = False          # v9.0c: disabled (PF<1.0 in 2/3 periods)
+    RANGE_MR_ENABLED = False          # v9.0c: disabled (PF<1.0 in 2/3 periods). Use USE_MEAN_REVERSION instead
     RANGE_MR_RSI_OB = 75             # RSI overbought for MR sell
     RANGE_MR_RSI_OS = 25             # RSI oversold for MR buy
     RANGE_MR_RSI_OB_MILD = 70
@@ -343,6 +343,16 @@ class GoldConfig:
     V11_MACRO_RANGE_TP_MULTI = 2.5    # TP multiplier when macro ER is low (vs 4.0)
     V11_MACRO_RANGE_PYRAMID = False   # Block pyramids in macro-range
 
+    # v13.0: Component Correlation Cap
+    USE_CORRELATION_CAP = True
+    # Groups of correlated components: if multiple fire same direction, only strongest gets full score
+    # Key = group name, Value = list of component indices
+    CORRELATED_GROUPS = {
+        'trend_alignment': [0, 13],    # H4 Trend(3pt) + Momentum Burst(3pt) share H4 MA
+        'rsi_family': [2, 12],         # H1 RSI(1pt) + H4 RSI Alignment(1pt)
+        'ma_family': [1, 4],           # H1 MA(2pt) + M15 MA Cross(2pt)
+    }
+    CORRELATION_CAP_RATIO = 0.5  # Secondary components get 50% of their points
 
     # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
     USE_MEAN_REVERSION = True
@@ -361,6 +371,23 @@ class GoldConfig:
     MR_LOT_SCALE = 0.7
     MR_MIN_SCORE = 2
 
+    # v13.0: Realtime Volatility Spike Detection
+    USE_REALTIME_SPIKE = True
+    SPIKE_ATR_MULTI = 2.5        # Single bar range > ATR × 2.5 = spike
+    SPIKE_COOLDOWN_BARS = 8      # 8 M15 bars (2 hours) cooldown after spike
+    SPIKE_CLOSE_LOSING = True    # Close losing positions on spike detection
+
+    # v13.0: Multi-scale Regime Detection
+    USE_MULTISCALE_REGIME = True
+    REGIME_ER_FAST = 8          # H4 8 bars (~32 hours) - short-term directionality
+    REGIME_ER_MED = 20          # H4 20 bars (~80 hours) - medium-term trend (existing)
+    REGIME_ER_SLOW = 40         # H4 40 bars (~160 hours) - structural range (reduced from 60)
+    REGIME_STABILITY_BARS = 3   # Require 3 consecutive bars same regime for confirmed
+    REGIME_TRANSITION_PENALTY = 0.7  # Lot scale during regime transition
+
+
+# Component base point values (for correlation cap calculation)
+COMPONENT_BASE_POINTS = {0: 3, 1: 2, 2: 1, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 2, 9: 2, 10: 1, 11: 1, 12: 1, 13: 3, 14: 2}
 
 # ============================================================
 # Indicators
@@ -782,6 +809,14 @@ class GoldBacktester:
         self.regime_stats = {'trend': 0, 'range': 0, 'high_vol': 0, 'crash': 0}
         self.regime_trades = {'trend': [], 'range': [], 'high_vol': []}
         self.mr_trades = 0  # Mean-reversion entries
+        self.spike_blocks = 0          # v13.0: spike detection blocks
+        self.spike_cooldown_until = 0  # v13.0: bar index for spike cooldown
+        # v13.0: Regime stability tracking
+        self.regime_stable_count = 0
+        self.regime_confirmed = True
+        self.regime_transition_bar = 0
+        self.regime_transition_mult = 1.0
+        self.last_stable_regime = 'trend'
         self.current_regime = 'trend'  # Default
 
         # v10.0: Intelligent Regime Engine state
@@ -858,6 +893,22 @@ class GoldBacktester:
         max_loss = self.balance * self.cfg.DAILY_MAX_LOSS_PCT / 100.0
         return self.daily_pnl <= -max_loss
 
+    def detect_realtime_spike(self, m15_df, i, current_atr):
+        """Detect M15-level volatility spikes for flash crash protection."""
+        if not self.cfg.USE_REALTIME_SPIKE or current_atr <= 0:
+            return False
+        bar_range = m15_df["High"].iloc[i] - m15_df["Low"].iloc[i]
+        if bar_range > current_atr * self.cfg.SPIKE_ATR_MULTI:
+            return True
+        # 2-bar combined range check (catches gap moves)
+        if i >= 1:
+            two_bar_high = max(m15_df["High"].iloc[i], m15_df["High"].iloc[i - 1])
+            two_bar_low = min(m15_df["Low"].iloc[i], m15_df["Low"].iloc[i - 1])
+            two_bar_range = two_bar_high - two_bar_low
+            if two_bar_range > current_atr * self.cfg.SPIKE_ATR_MULTI * 1.5:
+                return True
+        return False
+
     # ---- v9.0 Regime-Adaptive Methods ----
 
     def detect_regime_v9(self, h4_er, vol_ratio):
@@ -876,6 +927,66 @@ class GoldBacktester:
             else:
                 return 'high_vol'  # Mid-vol + low ER = treat as high vol
         return 'trend'
+
+    def detect_regime_v13(self, fast_er, med_er, slow_er, vol_ratio):
+        """Multi-scale 3-layer ER regime classification (v13.0).
+        Uses fast/med/slow ER for more nuanced regime detection.
+        Returns: 'crash', 'high_vol_trend', 'high_vol_range', 'trend_strong',
+                 'trend_weak', 'range'
+        """
+        cfg = self.cfg
+        if vol_ratio >= cfg.REGIME_VOL_CRASH:
+            return 'crash'
+
+        is_trending_fast = pd.notna(fast_er) and fast_er >= 0.3
+        is_trending_med = pd.notna(med_er) and med_er >= 0.3
+        is_structural_range = pd.notna(slow_er) and slow_er < 0.25
+        is_high_vol = vol_ratio >= cfg.REGIME_VOL_HIGH
+        is_mid_vol = vol_ratio >= cfg.REGIME_VOL_RANGE_CAP
+
+        if is_high_vol:
+            if is_trending_fast:
+                return 'high_vol_trend'
+            else:
+                return 'high_vol_range'
+
+        if is_trending_fast and is_trending_med:
+            return 'trend_strong'
+
+        if is_trending_fast and not is_trending_med:
+            return 'trend_weak'
+
+        return 'range'
+
+    def update_regime_stability(self, new_regime, bar_idx):
+        """Track regime stability for transition penalty."""
+        cfg = self.cfg
+        if not cfg.USE_MULTISCALE_REGIME:
+            return
+
+        # Map v13 regimes to base regimes for stability check
+        base_regime_map = {
+            'trend_strong': 'trend', 'trend_weak': 'trend',
+            'high_vol_trend': 'high_vol', 'high_vol_range': 'high_vol',
+            'range': 'range', 'crash': 'crash',
+        }
+        base = base_regime_map.get(new_regime, 'trend')
+        last_base = base_regime_map.get(self.last_stable_regime, 'trend')
+
+        if base == last_base:
+            self.regime_stable_count += 1
+        else:
+            self.regime_stable_count = 1
+            self.regime_transition_bar = bar_idx
+
+        self.last_stable_regime = new_regime
+        self.regime_confirmed = self.regime_stable_count >= cfg.REGIME_STABILITY_BARS
+
+        bars_since = bar_idx - self.regime_transition_bar
+        if bars_since < 12:
+            self.regime_transition_mult = cfg.REGIME_TRANSITION_PENALTY
+        else:
+            self.regime_transition_mult = 1.0
 
 
     def get_regime_profile(self, regime):
@@ -919,6 +1030,62 @@ class GoldBacktester:
                 'sl_widen': cfg.HIGHVOL_SL_WIDEN,
                 'tp_extend': cfg.HIGHVOL_TP_EXTEND,
                 'component_bonus': cfg.HIGHVOL_COMPONENT_BONUS,
+            }
+        elif regime == 'trend_strong':
+            # v13.0: Same as trend (both fast and med ER confirm)
+            return {
+                'min_score': cfg.TREND_MIN_SCORE,
+                'sl_multi': cfg.TREND_SL_ATR_MULTI,
+                'tp_multi': cfg.TREND_TP_ATR_MULTI,
+                'lot_scale': cfg.TREND_LOT_SCALE,
+                'allow_pyramid': cfg.TREND_ALLOW_PYRAMID,
+                'score_margin': cfg.TREND_SCORE_MARGIN,
+                'cooldown_bars': cfg.TREND_COOLDOWN_BARS,
+                'sl_widen': cfg.TREND_SL_WIDEN,
+                'tp_extend': cfg.TREND_TP_EXTEND,
+                'component_bonus': cfg.TREND_COMPONENT_BONUS,
+            }
+        elif regime == 'trend_weak':
+            # v13.0: Only fast ER trending, med ER not confirmed
+            return {
+                'min_score': 10,
+                'sl_multi': 1.3,
+                'tp_multi': 2.5,
+                'lot_scale': 0.8,
+                'allow_pyramid': False,
+                'score_margin': cfg.TREND_SCORE_MARGIN,
+                'cooldown_bars': 16,
+                'sl_widen': 1.1,
+                'tp_extend': 1.0,
+                'component_bonus': {},
+            }
+        elif regime == 'high_vol_trend':
+            # v13.0: High vol but with directional momentum
+            return {
+                'min_score': cfg.HIGHVOL_MIN_SCORE,
+                'sl_multi': cfg.HIGHVOL_SL_ATR_MULTI,
+                'tp_multi': cfg.HIGHVOL_TP_ATR_MULTI,
+                'lot_scale': 0.4,
+                'allow_pyramid': False,
+                'score_margin': cfg.HIGHVOL_SCORE_MARGIN,
+                'cooldown_bars': cfg.HIGHVOL_COOLDOWN_BARS,
+                'sl_widen': 1.0,
+                'tp_extend': 1.0,
+                'component_bonus': cfg.HIGHVOL_COMPONENT_BONUS,
+            }
+        elif regime == 'high_vol_range':
+            # v13.0: High vol without direction - most conservative
+            return {
+                'min_score': 14,
+                'sl_multi': 1.5,
+                'tp_multi': 2.0,
+                'lot_scale': 0.25,
+                'allow_pyramid': False,
+                'score_margin': 3,
+                'cooldown_bars': 24,
+                'sl_widen': 1.0,
+                'tp_extend': 1.0,
+                'component_bonus': {},
             }
         else:  # crash - should not trade
             return None
@@ -1117,6 +1284,33 @@ class GoldBacktester:
         }
         return modifiers.get((session, regime), 1.0)
 
+    def apply_correlation_cap(self, buy_score, sell_score, component_mask):
+        """Reduce double-counting from correlated components."""
+        if not self.cfg.USE_CORRELATION_CAP:
+            return buy_score, sell_score
+
+        for group_name, indices in self.cfg.CORRELATED_GROUPS.items():
+            # Find components in this group that fired in buy direction
+            buy_group = [i for i in indices if component_mask[i] == 1]
+            sell_group = [i for i in indices if component_mask[i] == -1]
+
+            if len(buy_group) > 1:
+                # Keep strongest at full, reduce others by cap ratio
+                max_pts_idx = max(buy_group, key=lambda i: COMPONENT_BASE_POINTS.get(i, 1))
+                for idx in buy_group:
+                    if idx != max_pts_idx:
+                        reduction = int(COMPONENT_BASE_POINTS.get(idx, 1) * self.cfg.CORRELATION_CAP_RATIO)
+                        buy_score -= reduction
+
+            if len(sell_group) > 1:
+                max_pts_idx = max(sell_group, key=lambda i: COMPONENT_BASE_POINTS.get(i, 1))
+                for idx in sell_group:
+                    if idx != max_pts_idx:
+                        reduction = int(COMPONENT_BASE_POINTS.get(idx, 1) * self.cfg.CORRELATION_CAP_RATIO)
+                        sell_score -= reduction
+
+        return max(0, buy_score), max(0, sell_score)
+
     def get_adaptive_exit_params(self, regime):
         """v10.0: Get regime-specific exit parameters."""
         if not self.cfg.USE_ADAPTIVE_EXIT or not self.cfg.USE_V10_ENGINE:
@@ -1208,24 +1402,61 @@ class GoldBacktester:
         return 0
 
     def check_reversal(self, h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg):
-        """Check for reversal setup: RSI extreme + divergence + S/R + candle pattern"""
+        """v13.0: Graduated reversal scoring (0-5 points).
+        Returns (direction, confidence) where confidence = score/5.
+        Previous version required all 4 conditions (RSI<25 + div + SR + candle).
+        New version uses score-based approach with minimum 2/5 threshold.
+        """
         if not cfg.USE_REVERSAL_MODE:
-            return 0
-        rsi = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
+            return 0, 0.0
 
+        rsi = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
+        rev_buy = 0
+        rev_sell = 0
+
+        # 1. RSI extreme (0-2 pts, graduated)
+        if rsi < 20:
+            rev_buy += 2
+        elif rsi < 30:
+            rev_buy += 1
+        if rsi > 80:
+            rev_sell += 2
+        elif rsi > 70:
+            rev_sell += 1
+
+        # 2. RSI Divergence (0-1 pt)
         h1_closes_series = h1_df[h1_mask]["Close"]
         h1_rsi_series = h1_df[h1_mask]["rsi"]
-        div_signal = get_divergence(h1_closes_series, h1_rsi_series, cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
-        sr_signal = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
-        candle_signal = get_candle_pattern(h1_df, ct)
+        div_signal = get_divergence(h1_closes_series, h1_rsi_series,
+                                    cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
+        if div_signal > 0:
+            rev_buy += 1
+        elif div_signal < 0:
+            rev_sell += 1
 
-        # Bullish reversal: RSI oversold + bullish divergence + support + bullish candle
-        if rsi < 25 and div_signal > 0 and sr_signal > 0 and candle_signal > 0:
-            return 1
-        # Bearish reversal: RSI overbought + bearish divergence + resistance + bearish candle
-        if rsi > 75 and div_signal < 0 and sr_signal < 0 and candle_signal < 0:
-            return -1
-        return 0
+        # 3. S/R proximity (0-1 pt)
+        sr_signal = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
+        if sr_signal > 0:
+            rev_buy += 1
+        elif sr_signal < 0:
+            rev_sell += 1
+
+        # 4. Candle pattern (0-1 pt)
+        candle_signal = get_candle_pattern(h1_df, ct)
+        if candle_signal > 0:
+            rev_buy += 1
+        elif candle_signal < 0:
+            rev_sell += 1
+
+        # Minimum 2/5 threshold (relaxed from 4/4)
+        REVERSAL_MIN = 2
+        if rev_buy >= REVERSAL_MIN and rev_buy > rev_sell:
+            confidence = rev_buy / 5.0
+            return 1, confidence
+        if rev_sell >= REVERSAL_MIN and rev_sell > rev_buy:
+            confidence = rev_sell / 5.0
+            return -1, confidence
+        return 0, 0.0
 
     def run(self, h4_df, h1_df, m15_df, usdjpy_df=None):
         cfg = self.cfg
@@ -1302,12 +1533,26 @@ class GoldBacktester:
             sum_abs_changes = h4_df['Close'].diff().abs().rolling(window=er_period).sum()
             h4_df['efficiency_ratio'] = net_change / sum_abs_changes.replace(0, np.nan)
 
+            # v13.0: Pre-compute fast ER (shorter lookback)
+            if cfg.USE_MULTISCALE_REGIME:
+                fast_period = cfg.REGIME_ER_FAST
+                fast_net = abs(h4_df['Close'] - h4_df['Close'].shift(fast_period))
+                fast_sum = h4_df['Close'].diff().abs().rolling(window=fast_period).sum()
+                h4_df['fast_er'] = fast_net / fast_sum.replace(0, np.nan)
+
         # v11.0: Pre-compute macro ER (longer lookback for structural range detection)
         if cfg.USE_V11_RANGE:
             macro_period = cfg.V11_MACRO_ER_PERIOD
             macro_net = abs(h4_df['Close'] - h4_df['Close'].shift(macro_period))
             macro_sum = h4_df['Close'].diff().abs().rolling(window=macro_period).sum()
             h4_df['macro_er'] = macro_net / macro_sum.replace(0, np.nan)
+
+            # v13.0: Slow ER (replaces macro ER for regime detection)
+            if cfg.USE_MULTISCALE_REGIME:
+                slow_period = cfg.REGIME_ER_SLOW
+                slow_net = abs(h4_df['Close'] - h4_df['Close'].shift(slow_period))
+                slow_sum = h4_df['Close'].diff().abs().rolling(window=slow_period).sum()
+                h4_df['slow_er'] = slow_net / slow_sum.replace(0, np.nan)
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
@@ -1374,6 +1619,27 @@ class GoldBacktester:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
+            # v13.0: Realtime volatility spike detection
+            if self.detect_realtime_spike(m15_df, i, current_atr):
+                self.spike_blocks += 1
+                self.spike_cooldown_until = i + self.cfg.SPIKE_COOLDOWN_BARS
+                # Close losing positions immediately on spike
+                if self.cfg.SPIKE_CLOSE_LOSING and self.open_positions:
+                    for pos in list(self.open_positions):
+                        if pos["direction"] == "BUY":
+                            unrealized = cc - pos["entry"]
+                        else:
+                            unrealized = pos["entry"] - cc
+                        if unrealized < 0:
+                            self._close_position(pos, cc, ct, "Spike", i)
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                continue
+
+            # v13.0: Spike cooldown
+            if i < self.spike_cooldown_until:
+                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
+                continue
+
             # v4.0: Advanced 4-state regime
             regime = self.get_advanced_regime(current_atr, current_atr_avg)
             if regime == 0:  # Crash - no new entries, only manage
@@ -1386,6 +1652,8 @@ class GoldBacktester:
             # v9.0: Regime-Adaptive Strategy
             h4_er_val = None
             macro_er_val = None
+            fast_er_val = None
+            slow_er_val = None
             if cfg.REGIME_METHOD == 'er':
                 h4_mask_er = h4_df.index <= ct
                 if h4_mask_er.sum() > 0:
@@ -1393,6 +1661,10 @@ class GoldBacktester:
                     # v11.0: Macro ER for structural range detection
                     if cfg.USE_V11_RANGE:
                         macro_er_val = h4_df[h4_mask_er].iloc[-1].get("macro_er")
+                    # v13.0: Multi-scale ER values
+                    if cfg.USE_MULTISCALE_REGIME:
+                        fast_er_val = h4_df[h4_mask_er].iloc[-1].get("fast_er")
+                        slow_er_val = h4_df[h4_mask_er].iloc[-1].get("slow_er")
 
             # v11.0: Determine if we're in a macro-range environment
             is_macro_range = False
@@ -1400,7 +1672,11 @@ class GoldBacktester:
                 is_macro_range = macro_er_val < cfg.V11_MACRO_ER_THRESHOLD
 
             if cfg.USE_REGIME_ADAPTIVE:
-                current_regime = self.detect_regime_v9(h4_er_val, vol_ratio)
+                if cfg.USE_MULTISCALE_REGIME:
+                    current_regime = self.detect_regime_v13(fast_er_val, h4_er_val, slow_er_val, vol_ratio)
+                    self.update_regime_stability(current_regime, i)
+                else:
+                    current_regime = self.detect_regime_v9(h4_er_val, vol_ratio)
                 self.current_regime = current_regime
                 self.regime_stats[current_regime] = self.regime_stats.get(current_regime, 0) + 1
 
@@ -1695,6 +1971,10 @@ class GoldBacktester:
                     elif component_mask[comp_idx] == -1:
                         sell_score += bonus
 
+            # v13.0: Correlation cap - reduce double-counting from correlated components
+            if cfg.USE_CORRELATION_CAP:
+                buy_score, sell_score = self.apply_correlation_cap(buy_score, sell_score, component_mask)
+
             # ---- v9.0/v4.0: Dynamic score barrier ----
             if cfg.USE_REGIME_ADAPTIVE and profile is not None:
                 dynamic_min_score = profile['min_score']
@@ -1795,6 +2075,10 @@ class GoldBacktester:
                 regime_lot_scale = min(regime_lot_scale, 0.3)
                 session_lot_mod = min(session_lot_mod, 0.3)
 
+            # v13.0: Regime transition lot penalty
+            if cfg.USE_MULTISCALE_REGIME:
+                regime_lot_scale *= self.regime_transition_mult
+
             if can_enter and (not is_pyramid or pyramid_ok):
                 pyramid_lot_multi = 1.0
                 if is_pyramid:
@@ -1868,8 +2152,8 @@ class GoldBacktester:
                     if current_regime in self.regime_trades:
                         self.regime_trades[current_regime].append(entry_type)
 
-            # v9.0: Mean-reversion entry for RANGE regime (only in low-vol range)
-            if not entered and pos_count == 0 and cfg.USE_REGIME_ADAPTIVE and current_regime == 'range' and vol_ratio < 1.0:
+            # v9.0/v13.0: Mean-reversion entry for RANGE regime (unified MR path)
+            if not entered and pos_count == 0 and cfg.USE_MEAN_REVERSION and cfg.USE_REGIME_ADAPTIVE and current_regime in ('range', 'high_vol_range') and vol_ratio < 1.0:
                 mr_dir, mr_score = self.check_mean_reversion_entry(
                     h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct)
                 if mr_dir is not None:
@@ -1890,19 +2174,22 @@ class GoldBacktester:
                     if 'range' in self.regime_trades:
                         self.regime_trades['range'].append('mean_reversion')
 
-            # v4.0: Reversal mode - only when no normal entry and no open positions
-            if not entered and pos_count == 0 and current_regime != 'range':
-                reversal = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
-                if reversal == 1:
-                    self._open_trade("BUY", cc, ct, 0, current_dd,
-                                     dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
-                                     entry_type="reversal", entry_bar=i)
-                elif reversal == -1:
-                    self._open_trade("SELL", cc, ct, 0, current_dd,
-                                     dynamic_sl_points, dynamic_tp_points, current_atr,
-                                     lot_multiplier * 0.5 * regime_lot_scale * session_lot_mod, component_mask,
-                                     entry_type="reversal", entry_bar=i)
+            # v13.0: Graduated reversal mode - confidence-scaled lot sizing
+            if not entered and pos_count == 0 and current_regime not in ('range', 'crash'):
+                rev_dir, rev_confidence = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
+                if rev_dir != 0:
+                    # Scale lot by confidence: 2/5=0.2x, 3/5=0.3x, 4/5=0.4x, 5/5=0.5x
+                    rev_lot_scale = rev_confidence * 0.5
+                    if rev_dir == 1:
+                        self._open_trade("BUY", cc, ct, 0, current_dd,
+                                         dynamic_sl_points, dynamic_tp_points, current_atr,
+                                         lot_multiplier * rev_lot_scale * regime_lot_scale * session_lot_mod, component_mask,
+                                         entry_type="reversal", entry_bar=i)
+                    else:
+                        self._open_trade("SELL", cc, ct, 0, current_dd,
+                                         dynamic_sl_points, dynamic_tp_points, current_atr,
+                                         lot_multiplier * rev_lot_scale * regime_lot_scale * session_lot_mod, component_mask,
+                                         entry_type="reversal", entry_bar=i)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
 
@@ -3092,6 +3379,7 @@ if __name__ == "__main__":
         print(f"  Crash regime skips:   {bt.crash_skips}")
         print(f"  Weekend closes:       {bt.weekend_closes}")
         print(f"  Spread blocks:        {bt.spread_blocks}")
+        print(f"  Spike blocks:         {bt.spike_blocks}")
         print(f"  Circuit breaker days: {sum(1 for t in bt.trades if t.get('reason') == 'CircuitBreaker')}")
 
         # v4.0: Attack stats
