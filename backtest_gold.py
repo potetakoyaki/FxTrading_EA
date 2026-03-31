@@ -1323,6 +1323,20 @@ class GoldBacktester:
 
         return max(0, buy_score), max(0, sell_score)
 
+    def get_entry_quality_penalty(self):
+        """v13.0: Returns MIN_SCORE penalty based on recent entry quality (MAE/MFE)."""
+        cfg = self.cfg
+        if not cfg.USE_TRADE_QUALITY:
+            return 0
+        if len(self.tq_mae_ratios) < cfg.TQ_MIN_TRADES:
+            return 0
+        # Calculate ratio of bad entries (MAE > threshold of SL)
+        bad_entries = sum(1 for r in self.tq_mae_ratios if r > cfg.TQ_MAE_THRESHOLD)
+        bad_ratio = bad_entries / len(self.tq_mae_ratios)
+        if bad_ratio > cfg.TQ_BAD_ENTRY_LIMIT:
+            return cfg.TQ_SCORE_PENALTY
+        return 0
+
     def get_adaptive_exit_params(self, regime):
         """v10.0: Get regime-specific exit parameters."""
         if not self.cfg.USE_ADAPTIVE_EXIT or not self.cfg.USE_V10_ENGINE:
@@ -1998,6 +2012,9 @@ class GoldBacktester:
                 regime_pf_adj = self.get_regime_pf_adjustment(current_regime)
                 dynamic_min_score = max(cfg.MIN_SCORE - 1, dynamic_min_score + regime_pf_adj)
 
+            # v13.0: Trade quality penalty
+            dynamic_min_score += self.get_entry_quality_penalty()
+
             # DD-based escalation (applies to all regimes)
             if current_dd >= 20.0:
                 dynamic_min_score = max(dynamic_min_score, 18)
@@ -2636,7 +2653,24 @@ class GoldBacktester:
             "score": pos["score"],
             "entry_type": pos.get("entry_type", "normal"),
             "momentum_burst": pos.get("momentum_burst", False),
+            "mae": round(pos.get('mae', 0), 2),
+            "mfe": round(pos.get('mfe', 0), 2),
         })
+
+        # v13.0: Update trade quality tracker
+        if self.cfg.USE_TRADE_QUALITY:
+            sl_dist = pos.get('sl_points', 0) * self.cfg.POINT
+            tp_dist = pos.get('tp_dist', 0)
+            if sl_dist > 0:
+                self.tq_mae_ratios.append(pos.get('mae', 0) / sl_dist)
+            if tp_dist > 0:
+                self.tq_mfe_ratios.append(pos.get('mfe', 0) / tp_dist)
+            # Keep only lookback window
+            if len(self.tq_mae_ratios) > self.cfg.TQ_LOOKBACK:
+                self.tq_mae_ratios.pop(0)
+            if len(self.tq_mfe_ratios) > self.cfg.TQ_LOOKBACK:
+                self.tq_mfe_ratios.pop(0)
+
         self.open_positions.remove(pos)
 
     def _unrealized_pnl(self, price):
