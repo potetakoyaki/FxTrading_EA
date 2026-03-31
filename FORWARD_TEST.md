@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-**EA Version**: AntigravityMTF_EA_Gold v12.0 (MQ5) / backtest v7.0 (Python)
+**EA Version**: AntigravityMTF_EA_Gold v12.3 (MQ5) / backtest v7.0 (Python)
 **Symbol**: XAUUSD (Gold) M15
 **Backtest Reference**:
 - Full period: PF=1.70, WR=67%, DD=7.3%, Sharpe=3.68
@@ -87,26 +87,28 @@ To find the data folder: In MT5, go to **File -> Open Data Folder**.
 
 The MQ5 file (v12.0) has older default values in some input parameters.
 The Python backtest (v7.0/v8.0) evolved these values through WFA optimization.
-**You MUST override the MQ5 defaults** with the values below:
+v12.4ではMQ5のデフォルト値がWFA検証済み値に統一されました。
+**追加の設定変更は不要です** — デフォルトのまま使用してください。
 
-| Parameter | MQ5 Default | Python (WFA) | Recommended | Why |
-|-----------|-------------|-------------|-------------|-----|
-| **RiskPercent** | 0.3 | 0.75 | **0.75** | WFA-validated; 0.3 is too conservative |
-| **SL_ATR_Multi** | 1.5 | 1.2 | **1.2** | Tighter SL improves RR ratio (PF +0.36) |
-| **TP_ATR_Multi** | 3.5 | 4.0 | **4.0** | Wider TP captures trends (WFA 12->13/14) |
-| **BE_ATR_Multi** | 1.5 | 0.8 | **0.8** | Earlier breakeven protects capital |
-| **HighVol_SL_Bonus** | 0.5 | 0.0 | **0.0** | No extra SL in volatile conditions |
-| **MinEntryScore** | 9 | 12 | **12** | Higher quality filter (PF 1.45->1.61) |
-| **CooldownMinutes** | 240 (=16 bars) | 480 (=32 bars) | **480** | Longer cooldown reduces DD |
-| **MaxPositions** | 3 | 1 | **1** | Pyramid disabled (DD 21.6%->11.0%) |
-| **MaxPyramidPositions** | 3 | 1 | **1** | Pyramid disabled |
-| **UseVolumeClimax** | true | false | **false** | 34% WR, harmful noise |
-| **Chandelier_ATR_Multi** | 3.0 | 2.0 | **2.0** | Tighter exit locks profit faster |
-| **Kelly_MaxRisk** | 1.0 | 1.5 | **1.5** | Allow more aggressive sizing in streaks |
-| **Trend_SL_Widen** | 1.3 | 1.5 | **1.5** | Better pullback tolerance in trends |
-| **Trend_SL_Tighten** | 0.7 | 0.6 | **0.6** | Faster counter-trend exit |
-| **UseRSIMomentumConfirm** | true | true | **true** | Keep enabled (WFA 13->14/16) |
-| **RSIMomentumLookback** | 3 | 3 | **3** | Matches backtest |
+変更可能なinputパラメータ（47個）のうち、主要なものは以下の通りです：
+
+| Parameter | Default (=WFA値) | 説明 |
+|-----------|-------------------|------|
+| **RiskPercent** | 0.75 | 基本リスク% |
+| **SL_ATR_Multi** | 1.2 | SL = ATR × 1.2 |
+| **TP_ATR_Multi** | 4.0 | TP = ATR × 4.0 |
+| **BE_ATR_Multi** | 0.8 | 建値移動 = ATR × 0.8 |
+| **MinEntryScore** | 12 | 最低エントリースコア |
+| **CooldownMinutes** | 480 | SL後クールダウン(8時間) |
+| **MaxPyramidPositions** | 1 | ピラミッド無効(DD削減) |
+| **Trend_SL_Widen** | 1.5 | 順トレンドSL倍率 |
+| **Trend_SL_Tighten** | 0.6 | 逆トレンドSL倍率 |
+| **GMTOffset** | 2 | ブローカーGMTオフセット |
+
+以下のパラメータはconst化済み（WFA検証値で固定）：
+- UseRSIMomentumConfirm=true, RSIMomentumLookback=3
+- HighVol_SL_Bonus=0.0, UseVolumeClimax=false
+- Chandelier_ATR_Multi=2.0, Kelly_MaxRisk=1.5
 
 ### 4.2 Settings to Keep at MQ5 Defaults
 
