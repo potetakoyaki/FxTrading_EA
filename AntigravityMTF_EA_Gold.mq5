@@ -79,7 +79,7 @@ input double Trend_TP_Extend   = 1.2;      // 順トレンドTP倍率
 input double Trend_TP_Tighten  = 0.8;      // 逆トレンドTP倍率
 
 input group "=== レジーム適応 ==="
-input bool   UseRegimeAdaptive = true;     // レジーム適応戦略ON/OFF
+input bool   UseRegimeAdaptive = false;    // レジーム適応戦略ON/OFF（MQ5独自、まずOFFでテスト）
 input double TrendSLMulti      = 1.5;      // トレンド時SL倍率
 input double TrendTPMulti      = 4.0;      // トレンド時TP倍率
 input double RangeSLMulti      = 1.1;      // レンジ時SL倍率
@@ -130,18 +130,22 @@ const bool   UseAdaptiveSizing = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseMomentumBurst  = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseVolumeClimax   = false;    // HARDCODED: WFA検証済み (false=無効, WR34%ノイズ)
 const bool   UseReversalMode   = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseTimeDecaySL    = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseATRRatchetTrail = true;    // HARDCODED: WFA検証済みtrue
-const bool   UseSessionRegime  = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseAdaptiveExit   = true;     // HARDCODED: WFA検証済みtrue
+// WARNING: 以下のv9-v12機能はMQ5独自でPython WFA未検証
+// MT5テストで効果を確認してからONにすること
+const bool   UseTimeDecaySL    = false;    // v9.0 時間減衰SL（MQ5独自、未検証）
+const bool   UseATRRatchetTrail = false;   // v9.0 ATRラチェットトレール（MQ5独自、未検証）
+const bool   UseSessionRegime  = false;    // v10.0 セッション×レジーム（MQ5独自、未検証）
+const bool   UseAdaptiveExit   = false;    // v10.0 適応的出口（MQ5独自、未検証）
 const bool   UseRSIMomentumConfirm = true; // HARDCODED: v10.1 WFA検証済みtrue
-const bool   UseV11Range       = true;     // HARDCODED: v11.0 WFA検証済みtrue
+const bool   UseV11Range       = false;    // v11.0 レンジガード（MQ5独自、未検証）
 
 // --- v13.0 機能トグル ---
-const bool   UseCorrelationCap    = true;  // HARDCODED: v13.0 コンポーネント相関キャップ
-const bool   UseRealtimeSpike     = true;  // HARDCODED: v13.0 リアルタイムスパイク検知
-const bool   UseMultiscaleRegime  = true;  // HARDCODED: v13.0 マルチスケールレジーム検出
-const bool   UseTradeQuality      = true;  // HARDCODED: v13.0 MAE/MFE品質トラッカー
+// WARNING: これらの機能はPython WFAで未検証のためデフォルトOFF
+// MT5テストで検証後に個別にONにすること
+const bool   UseCorrelationCap    = false; // v13.0 コンポーネント相関キャップ（未検証）
+const bool   UseRealtimeSpike     = false; // v13.0 リアルタイムスパイク検知（未検証）
+const bool   UseMultiscaleRegime  = false; // v13.0 マルチスケールレジーム検出（未検証）
+const bool   UseTradeQuality      = false; // v13.0 MAE/MFE品質トラッカー（未検証）
 
 // --- USD相関フィルター詳細 ---
 const int    Corr_MA_Fast      = 10;       // HARDCODED: Python backtesterと同値
@@ -292,7 +296,7 @@ const double HVRangeTPMulti       = 2.0;   // HARDCODED: high_vol_range TP倍率
 const double HVRangeLotScale      = 0.25;  // HARDCODED: high_vol_range ロットスケール
 
 // --- v12.1 動的コンポーネント有効性 ---
-const bool   UseDynamicComponentScoring = true;   // HARDCODED: WFA検証済みtrue
+const bool   UseDynamicComponentScoring = false;  // v12.1 動的CE（MQ5独自、MT5テスト後にON）
 const int    CompEffectMinTrades        = 10;     // HARDCODED: WFA固定
 const double CompEffectBoostWR          = 0.6;    // HARDCODED: WFA固定
 const double CompEffectPenaltyWR        = 0.4;    // HARDCODED: WFA固定
