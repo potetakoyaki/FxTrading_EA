@@ -20,7 +20,10 @@ v10.0: Intelligent Regime Engine
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
