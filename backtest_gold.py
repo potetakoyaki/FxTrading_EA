@@ -385,6 +385,14 @@ class GoldConfig:
     REGIME_STABILITY_BARS = 3   # Require 3 consecutive bars same regime for confirmed
     REGIME_TRANSITION_PENALTY = 0.7  # Lot scale during regime transition
 
+    # v13.0: Trade Quality (MAE/MFE) Tracking
+    USE_TRADE_QUALITY = True
+    TQ_LOOKBACK = 50            # Track last 50 trades
+    TQ_MIN_TRADES = 15          # Minimum trades before filtering
+    TQ_MAE_THRESHOLD = 0.7      # MAE > 70% of SL = bad entry
+    TQ_BAD_ENTRY_LIMIT = 0.5    # If >50% bad entries, raise MIN_SCORE
+    TQ_SCORE_PENALTY = 1        # MIN_SCORE += 1 when entry quality is poor
+
 
 # Component base point values (for correlation cap calculation)
 COMPONENT_BASE_POINTS = {0: 3, 1: 2, 2: 1, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 2, 9: 2, 10: 1, 11: 1, 12: 1, 13: 3, 14: 2}
@@ -818,6 +826,10 @@ class GoldBacktester:
         self.regime_transition_mult = 1.0
         self.last_stable_regime = 'trend'
         self.current_regime = 'trend'  # Default
+
+        # v13.0: Trade quality tracking (MAE/MFE)
+        self.tq_mae_ratios = []  # MAE / SL_distance for each closed trade
+        self.tq_mfe_ratios = []  # MFE / TP_distance for each closed trade
 
         # v10.0: Intelligent Regime Engine state
         # 1. Regime blending weights (sum to 1.0)
@@ -2327,6 +2339,15 @@ class GoldBacktester:
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
 
+                # v13.0: Track MAE/MFE
+                if 'mae' not in pos:
+                    pos['mae'] = 0.0
+                    pos['mfe'] = 0.0
+                adverse = pos["entry"] - low   # How far price went against us
+                favorable = high - pos["entry"]  # How far price went for us
+                pos['mae'] = max(pos['mae'], adverse)
+                pos['mfe'] = max(pos['mfe'], favorable)
+
                 # v10.0/v2.0: Partial close with regime-adaptive ratio
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
                     partial_tp_ratio = exit_params['partial_tp_ratio']
@@ -2428,6 +2449,15 @@ class GoldBacktester:
                 profit_price = pos["entry"] - close
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
+
+                # v13.0: Track MAE/MFE
+                if 'mae' not in pos:
+                    pos['mae'] = 0.0
+                    pos['mfe'] = 0.0
+                adverse = high - pos["entry"]  # How far price went against us (SELL)
+                favorable = pos["entry"] - low  # How far price went for us (SELL)
+                pos['mae'] = max(pos['mae'], adverse)
+                pos['mfe'] = max(pos['mfe'], favorable)
 
                 # v10.0/v2.0: Partial close with regime-adaptive ratio
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
