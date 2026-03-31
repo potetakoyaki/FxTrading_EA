@@ -207,6 +207,10 @@ input double HVPartialTP        = 0.5;
 input double HVBEMulti          = 1.5;
 input double HVTrailMulti       = 1.0;
 
+input group "=== v10.1 RSIモメンタム確認 ==="
+input bool   UseRSIMomentumConfirm = true;    // v10.1: RSI Momentum Confirmation
+input int    RSIMomentumLookback   = 3;        // RSI Momentum lookback bars
+
 input group "=== v11.0 レンジマーケットガード ==="
 input bool   UseV11Range        = true;
 input int    MacroERPeriod      = 60;
@@ -611,6 +615,32 @@ void OnTick()
    // Clamp scores to minimum 0
    buyScore = (int)MathMax(0, buyScore);
    sellScore = (int)MathMax(0, sellScore);
+
+   // v10.1: RSI Momentum Confirmation
+   // BUY requires H1 RSI > 50 AND rising over lookback bars
+   // SELL requires H1 RSI < 50 AND falling over lookback bars
+   if(UseRSIMomentumConfirm)
+   {
+      double rsiNow  = GetIndicatorValue(h_h1_rsi, 0, 1);
+      double rsiPrev = GetIndicatorValue(h_h1_rsi, 0, 1 + RSIMomentumLookback);
+
+      if(rsiNow > 0 && rsiPrev > 0)
+      {
+         // Block BUY if RSI not bullish momentum
+         if(buyScore > 0 && !(rsiNow > 50.0 && rsiNow > rsiPrev))
+         {
+            buyScore = 0;
+            buyReasons += "!RSImom ";
+         }
+
+         // Block SELL if RSI not bearish momentum
+         if(sellScore > 0 && !(rsiNow < 50.0 && rsiNow < rsiPrev))
+         {
+            sellScore = 0;
+            sellReasons += "!RSImom ";
+         }
+      }
+   }
 
    // ──── エントリー ────
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
