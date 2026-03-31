@@ -45,6 +45,7 @@ input int    CooldownMinutes   = 240;      // SL後クールダウン(分)
 input group "=== 時間フィルター ==="
 input int    TradeStartHour    = 8;        // 取引開始時間(サーバー時間)
 input int    TradeEndHour      = 22;       // 取引終了時間(サーバー時間)
+input int    GMTOffset         = 2;        // FIX: Issue #11 - ブローカーGMTオフセット (GMT+2=default)
 input bool   AvoidFriday       = true;     // 金曜18時以降エントリー禁止
 
 input group "=== 防御 ==="
@@ -156,7 +157,7 @@ const double Kelly_MinRisk        = 0.1;   // HARDCODED: Kelly最小リスク%
 const double Kelly_MaxRisk        = 1.0;   // HARDCODED: Kelly最大リスク%
 
 // --- 防御詳細 ---
-const int    MaxPositions      = 3;        // HARDCODED: MaxPyramidPositionsと同値、冗長
+// FIX: Issue #12 - Removed unused MaxPositions (redundant with MaxPyramidPositions)
 const int    NewsBlockMinutes  = 30;       // HARDCODED: WFA固定
 const int    MaxDynamicSpread  = 80;       // HARDCODED: WFA固定
 const double CrashATRMulti     = 3.0;      // HARDCODED: WFA固定
@@ -166,6 +167,10 @@ const int    TimeDecayStartBars = 48;      // HARDCODED: 48 M15 = 12h、WFA固�
 const double TimeDecayRate      = 0.85;    // HARDCODED: SL減衰率、WFA固定
 const double RatchetStepATR     = 0.5;     // HARDCODED: ラチェットステップ、WFA固定
 const double SlippagePoints     = 3.0;     // HARDCODED: スリッページ、通常固定
+
+// FIX: Issue #26 - Dedicated reversal SL/TP multipliers (tighter for counter-trend entries)
+const double ReversalSL_Multi  = 0.8;     // HARDCODED: Tighter SL for counter-trend reversal
+const double ReversalTP_Multi  = 0.6;     // HARDCODED: More conservative TP for counter-trend reversal
 
 // --- v8.0 ERレジーム検出 ---
 const string RegimeMethod       = "er";    // HARDCODED: ER方式のみ使用
@@ -247,7 +252,7 @@ int            h_h4_ma_fast, h_h4_ma_slow, h_h4_adx, h_h4_sma50;
 int            h_h1_ma_fast, h_h1_ma_slow, h_h1_rsi, h_h1_bb;
 int            h_m15_ma_fast, h_m15_ma_slow;
 int            h_m15_atr;                 // M15 ATR（動的SL/TP用）
-datetime       lastBarTime;
+datetime       lastBarTime;   // FIX: Issue #21 - Resets on restart; acceptable since CountMyPositions guards double entry
 datetime       lastSLTime;
 ulong          partialClosedTickets[];
 
@@ -257,7 +262,7 @@ int            h_h4_rsi;
 double         g_dailyPnL;
 int            g_lastDay;
 bool           g_circuitBreaker;
-int            g_pyramidCount;
+// FIX: Issue #9 - Removed dead g_pyramidCount variable (CountMyPositions() used instead)
 int            h_usdjpy_ma_fast, h_usdjpy_ma_slow, h_usdjpy_atr;
 double         recentTradeResults[50];
 int            tradeResultIndex;
@@ -281,7 +286,6 @@ int            g_compTotal[COMP_COUNT];    // total trades per component
 ulong          g_trackPosIDs[COMP_TRACK_MAX];   // position IDs
 int            g_trackMasks[COMP_TRACK_MAX];     // component masks at entry
 int            g_trackCount;
-int            g_pendingComponentMask;           // temp storage for OnTradeTransaction
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -289,8 +293,14 @@ int            g_pendingComponentMask;           // temp storage for OnTradeTran
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
-   trade.SetDeviationInPoints(30);
-   peakBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   // FIX: Issue #24 - Use SlippagePoints instead of hardcoded 30
+   trade.SetDeviationInPoints((int)SlippagePoints);
+   // FIX: Issue #20 - Restore peakBalance from GlobalVariable to survive EA restart
+   string pvKey = "AGMTF_" + IntegerToString(MagicNumber) + "_peakBal";
+   if(GlobalVariableCheck(pvKey))
+      peakBalance = GlobalVariableGet(pvKey);
+   else
+      peakBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    // ブローカー環境に応じたフィルポリシーを動的判定
    ENUM_ORDER_TYPE_FILLING fillType = ORDER_FILLING_FOK;  // デフォルト
    long fillMode = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
@@ -380,10 +390,19 @@ int OnInit()
    LoadTradeResults();
 
    // v4.0: 初期化
+   // FIX: Issue #23 - g_dailyPnL limitation documented: not reconstructed on restart,
+   // but resets correctly on date change in OnTick. Intraday restart may lose accumulated PnL.
    g_dailyPnL = 0;
    g_lastDay = 0;
    g_circuitBreaker = false;
-   g_pyramidCount = 0;
+   // FIX: Issue #9 - g_pyramidCount removed (dead code)
+
+   // FIX: Issue #22 - Restore lastSLTime from GlobalVariable to survive EA restart
+   {
+      string slKey = "AGMTF_" + IntegerToString(MagicNumber) + "_lastSL";
+      if(GlobalVariableCheck(slKey))
+         lastSLTime = (datetime)(long)GlobalVariableGet(slKey);
+   }
 
    // v9.0: レジーム初期化
    g_currentRegime = "trend";
@@ -399,7 +418,6 @@ int OnInit()
    ArrayInitialize(g_trackPosIDs, 0);
    ArrayInitialize(g_trackMasks, 0);
    g_trackCount = 0;
-   g_pendingComponentMask = 0;
    LoadComponentStats();
 
    Print("AntigravityMTF EA [GOLD] v12.0 初期化完了");
@@ -509,9 +527,57 @@ void OnTick()
 
    int volRegime = GetVolatilityRegime(currentATR);
 
+   // --- CRITICAL #1 FIX: Compute regime BEFORE scoring so g_currentRegime is current-bar ---
+   // v8.0: Efficiency Ratio on H4
+   double h4_er = 0;
+   if(RegimeMethod == "er")
+   {
+      double h4CloseArr[];
+      ArraySetAsSeries(h4CloseArr, true);
+      if(CopyClose(_Symbol, PERIOD_H4, 0, RegimeERPeriod + 1, h4CloseArr) >= RegimeERPeriod + 1)
+      {
+         double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[RegimeERPeriod]);
+         double sumAbsChanges = 0;
+         for(int k = 0; k < RegimeERPeriod; k++)
+            sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+         if(sumAbsChanges > 0)
+            h4_er = netChange / sumAbsChanges;
+      }
+   }
+
+   // v9.0: Store h4 ER globally and compute vol_ratio for regime detection
+   g_h4ER = h4_er;
+   double avgATR = GetAverageATR();
+   g_volRatio = (avgATR > 0) ? currentATR / avgATR : 1.0;
+
+   // v9.0: 2D Regime Classification
+   if(UseRegimeAdaptive) {
+      g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
+      if(g_currentRegime == "crash") return; // No trading in crash
+   } else {
+      g_currentRegime = "trend";
+   }
+
+   // v11.0: Macro ER
+   g_macroER = CalcMacroER();
+   g_isMacroRange = (UseV11Range && g_macroER < MacroERThreshold);
+
+   // v10.0: Session detection
+   {
+      MqlDateTime dtSess;
+      TimeCurrent(dtSess);
+      g_currentSession = GetCurrentSession(dtSess.hour);
+   }
+   // --- END CRITICAL #1 FIX ---
+
    // 動的リスクスケーリング
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(balance > peakBalance) peakBalance = balance;
+   if(balance > peakBalance)
+   {
+      peakBalance = balance;
+      // FIX: Issue #20 - Persist peakBalance across EA restarts
+      GlobalVariableSet("AGMTF_" + IntegerToString(MagicNumber) + "_peakBal", peakBalance);
+   }
    double currentDD = (peakBalance > 0) ? (peakBalance - balance) / peakBalance * 100 : 0;
 
    // ──── スコアリング（v4.0: 最大27点, v12.1: 動的コンポーネント有効性） ────
@@ -540,8 +606,9 @@ void OnTick()
 
    // 1. H4 トレンド（3点）
    int h4Trend = GetH4Trend();
-   if(h4Trend == 1)       { buyScore += (int)MathFloor(3 * ce0);  buyReasons  += "H4^ "; componentMask |= (1 << 0); componentMask |= (1 << 15); } // bit15 = buy direction
-   else if(h4Trend == -1) { sellScore += (int)MathFloor(3 * ce0);  sellReasons += "H4v "; componentMask |= (1 << 0); } // bit15 absent = sell direction
+   // FIX: Issue #25 - Use bit 16 instead of bit 15 for direction flag to avoid future component collision
+   if(h4Trend == 1)       { buyScore += (int)MathFloor(3 * ce0);  buyReasons  += "H4^ "; componentMask |= (1 << 0); componentMask |= (1 << 16); } // bit16 = buy direction
+   else if(h4Trend == -1) { sellScore += (int)MathFloor(3 * ce0);  sellReasons += "H4v "; componentMask |= (1 << 0); } // bit16 absent = sell direction
 
    // 2. H1 MA方向（2点）
    int h1MACross = GetH1MACross();
@@ -656,7 +723,7 @@ void OnTick()
          int h4Pts = (int)MathFloor(3 * ce0);
          int reduction2 = h4Pts - H4TrendCapInRange;
          if(reduction2 > 0) {
-            if(componentMask & (1 << 15)) // direction bit = buy
+            if(componentMask & (1 << 16)) // FIX: Issue #25 - direction bit moved to bit 16
                buyScore -= reduction2;
             else
                sellScore -= reduction2;
@@ -701,6 +768,7 @@ void OnTick()
    }
 
    // ──── エントリー ────
+   // FIX: Issue #6 - ask/bid for SL/TP calculation only; re-fetched before execution
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
@@ -757,46 +825,8 @@ void OnTick()
    }
    double h4Slope = h4Sma50_now - h4Sma50_prev;
 
-   // v8.0: Efficiency Ratio on H4
-   double h4_er = 0;
-   if(RegimeMethod == "er")
-   {
-      double h4CloseArr[];
-      ArraySetAsSeries(h4CloseArr, true);
-      if(CopyClose(_Symbol, PERIOD_H4, 0, RegimeERPeriod + 1, h4CloseArr) >= RegimeERPeriod + 1)
-      {
-         double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[RegimeERPeriod]);
-         double sumAbsChanges = 0;
-         for(int k = 0; k < RegimeERPeriod; k++)
-            sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
-         if(sumAbsChanges > 0)
-            h4_er = netChange / sumAbsChanges;
-      }
-   }
-
-   // v9.0: Store h4 ER globally and compute vol_ratio for regime detection
-   g_h4ER = h4_er;
-   double avgATR = GetAverageATR();
-   g_volRatio = (avgATR > 0) ? currentATR / avgATR : 1.0;
-
-   // v9.0: 2D Regime Classification
-   if(UseRegimeAdaptive) {
-      g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
-      if(g_currentRegime == "crash") return; // No trading in crash
-   } else {
-      g_currentRegime = "trend";
-   }
-
-   // v11.0: Macro ER
-   g_macroER = CalcMacroER();
-   g_isMacroRange = (UseV11Range && g_macroER < MacroERThreshold);
-
-   // v10.0: Session detection
-   {
-      MqlDateTime dtSess;
-      TimeCurrent(dtSess);
-      g_currentSession = GetCurrentSession(dtSess.hour);
-   }
+   // NOTE: h4_er, g_volRatio, g_currentRegime, g_macroER, g_isMacroRange,
+   // g_currentSession are now computed BEFORE scoring (CRITICAL #1 FIX above)
 
    bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
    bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
@@ -901,9 +931,10 @@ void OnTick()
          double sl = NormalizeDouble(ask - slDist, _Digits);
          double tp = NormalizeDouble(ask + tpDist, _Digits);
 
-         g_pendingComponentMask = componentMask;
+         // FIX: Issue #6 - Re-fetch ask immediately before execution to avoid stale price
+         ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          if(trade.Buy(lot, _Symbol, ask, sl, tp,
-            StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f", buyScore, componentMask, g_currentRegime, currentATR/_Point)))
+            StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f|CM=%d", buyScore, componentMask, g_currentRegime, currentATR/_Point, componentMask)))
          {
             Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                   "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -920,9 +951,10 @@ void OnTick()
          double sl = NormalizeDouble(bid + slDist, _Digits);
          double tp = NormalizeDouble(bid - tpDist, _Digits);
 
-         g_pendingComponentMask = componentMask;
+         // FIX: Issue #6 - Re-fetch bid immediately before execution to avoid stale price
+         bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          if(trade.Sell(lot, _Symbol, bid, sl, tp,
-            StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f", sellScore, componentMask, g_currentRegime, currentATR/_Point)))
+            StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f|CM=%d", sellScore, componentMask, g_currentRegime, currentATR/_Point, componentMask)))
          {
             Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                   "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
@@ -941,23 +973,33 @@ void OnTick()
          double revLot = NormalizeDouble(lot * 0.5, 2);
          revLot = MathMax(MinLots, revLot);
 
+         // FIX: Issue #26 - Use dedicated reversal SL/TP multipliers for counter-trend entries
+         double revSlDist = slDist * ReversalSL_Multi;  // Tighter SL for reversals
+         double revTpDist = tpDist * ReversalTP_Multi;  // More conservative TP
+         revSlDist = MathMax(MinSL_Points * _Point, revSlDist);  // Enforce minimum SL
+         revTpDist = MathMax(revSlDist * 1.5, revTpDist);        // Enforce minimum RR
+
          if(reversalDir == 1)
          {
-            double sl = NormalizeDouble(ask - slDist, _Digits);
-            double tp = NormalizeDouble(ask + tpDist, _Digits);
-            g_pendingComponentMask = componentMask;
+            // FIX: Issue #6 - Re-fetch ask for reversal entry
+            ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double sl = NormalizeDouble(ask - revSlDist, _Digits);
+            double tp = NormalizeDouble(ask + revTpDist, _Digits);
             if(trade.Buy(revLot, _Symbol, ask, sl, tp,
-               StringFormat("GOLD REV-BUY M:%d", componentMask)))
-               Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2));
+               StringFormat("GOLD REV-BUY M:%d|CM=%d", componentMask, componentMask)))
+               Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2),
+                     " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
          else if(reversalDir == -1)
          {
-            double sl = NormalizeDouble(bid + slDist, _Digits);
-            double tp = NormalizeDouble(bid - tpDist, _Digits);
-            g_pendingComponentMask = componentMask;
+            // FIX: Issue #6 - Re-fetch bid for reversal entry
+            bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double sl = NormalizeDouble(bid + revSlDist, _Digits);
+            double tp = NormalizeDouble(bid - revTpDist, _Digits);
             if(trade.Sell(revLot, _Symbol, bid, sl, tp,
-               StringFormat("GOLD REV-SELL M:%d", componentMask)))
-               Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2));
+               StringFormat("GOLD REV-SELL M:%d|CM=%d", componentMask, componentMask)))
+               Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2),
+                     " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
       }
    }
@@ -1002,8 +1044,10 @@ double GetSessionLotModifier(string session, string regime)
 //+------------------------------------------------------------------+
 string GetCurrentSession(int hour)
 {
-   if(hour >= 0 && hour < 8) return "asian";
-   if(hour >= 8 && hour < 13) return "london";
+   // FIX: Issue #11 - Convert server time to GMT before session detection
+   int gmtHour = (hour - GMTOffset + 24) % 24;
+   if(gmtHour >= 0 && gmtHour < 8) return "asian";
+   if(gmtHour >= 8 && gmtHour < 13) return "london";
    return "ny";
 }
 
@@ -1097,12 +1141,14 @@ int GetSessionBonus()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
+   // FIX: Issue #11 - Convert server time to GMT for session bonus
+   int gmtHour = (dt.hour - GMTOffset + 24) % 24;
 
-   // ロンドン/NY重複 (13:00-17:00 サーバー時間 ≒ GMT+2)
-   if(dt.hour >= 13 && dt.hour < 17) return 1;
+   // ロンドン/NY重複 (13:00-17:00 GMT)
+   if(gmtHour >= 13 && gmtHour < 17) return 1;
 
-   // ロンドンセッション初動 (8:00-11:00)
-   if(dt.hour >= 8 && dt.hour < 11) return 1;
+   // ロンドンセッション初動 (8:00-11:00 GMT)
+   if(gmtHour >= 8 && gmtHour < 11) return 1;
 
    return 0;
 }
@@ -1190,10 +1236,15 @@ int GetChannelSignal()
    int lookback = 40;
    double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
 
+   // FIX: Issue #16 - Batch fetch closes instead of calling iClose 40x2 times in loops
+   double closes[];
+   ArraySetAsSeries(closes, true);
+   if(CopyClose(_Symbol, PERIOD_H1, 0, lookback, closes) != lookback) return 0;
+
    for(int i = lookback - 1; i >= 0; i--)
    {
       double x = lookback - 1 - i;
-      double y = iClose(_Symbol, PERIOD_H1, i);
+      double y = closes[i];
       sumX += x; sumY += y; sumXY += x * y; sumX2 += x * x;
    }
 
@@ -1206,7 +1257,7 @@ int GetChannelSignal()
    {
       double x = lookback - 1 - i;
       double predicted = intercept + slope * x;
-      double actual    = iClose(_Symbol, PERIOD_H1, i);
+      double actual    = closes[i];
       sumRes2 += MathPow(actual - predicted, 2);
    }
    double stdDev = MathSqrt(sumRes2 / n);
@@ -1358,9 +1409,10 @@ int GetSRSignal(double currentPrice, double currentATR)
    if(!UseSRLevels || currentATR <= 0) return 0;
 
    // H1足からスイングハイ/ローを収集
+   // FIX: Issue #17 - Pre-allocate array with reserve to avoid O(n^2) resizing
    double levels[];
    int levelCount = 0;
-   ArrayResize(levels, 0);
+   ArrayResize(levels, 0, 50);
 
    for(int i = SR_SwingStrength; i < SR_Lookback - SR_SwingStrength; i++)
    {
@@ -1604,6 +1656,9 @@ double GetAdaptiveRisk()
    }
 
    if(wins == 0 || totalLoss == 0) return RiskPercent;
+   // CRITICAL #3 FIX: Guard against zero division when wins >= lookback
+   if(wins >= lookback) return RiskPercent;
+   if(lookback - wins == 0) return RiskPercent;  // belt-and-suspenders
 
    double W = (double)wins / lookback;         // 勝率
    double R = (totalWin / wins) / (totalLoss / (lookback - wins));  // ペイオフレシオ
@@ -1659,7 +1714,12 @@ double CalcLotSize(double entryPrice, double slDist)
    if(slDist <= 0) return MinLots;
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(balance > peakBalance) peakBalance = balance;
+   if(balance > peakBalance)
+   {
+      peakBalance = balance;
+      // FIX: Issue #20 - Persist peakBalance across EA restarts
+      GlobalVariableSet("AGMTF_" + IntegerToString(MagicNumber) + "_peakBal", peakBalance);
+   }
    double currentDD = (peakBalance > 0) ? (peakBalance - balance) / peakBalance * 100 : 0;
 
    // v3.0: 適応的リスク
@@ -1751,21 +1811,31 @@ void ManageOpenPositions()
                   {
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
-                     trade.PositionModify(ticket, newSL, tp);
+                     // FIX: Issue #7 - Retry PositionModify up to 3 times after partial close
+                     bool modifyOk = false;
+                     for(int retry = 0; retry < 3; retry++)
+                     {
+                        if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
+                        Sleep(100);
+                     }
+                     if(!modifyOk)
+                        Print("WARNING: PositionModify failed after 3 retries for BUY ticket ", ticket, " SL=", newSL);
                      Print("GOLD 半利確 BUY: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
             }
          }
 
+         // FIX: Issue #8 - Breakeven and trailing are now sequential (not else-if)
          // 建値移動
          if(profitDist >= beDist && sl < openPrice)
          {
             double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
-            trade.PositionModify(ticket, newSL, tp);
+            if(trade.PositionModify(ticket, newSL, tp))
+               sl = newSL; // Update local SL for trailing check below
          }
-         // トレーリング
-         else if(profitDist >= beDist * 1.5)
+         // トレーリング — now checked after breakeven (sequential)
+         if(profitDist >= beDist * 1.5)
          {
             double newSL = NormalizeDouble(bid - trailStep, _Digits);
             if(newSL > sl + 5 * _Point)
@@ -1832,21 +1902,31 @@ void ManageOpenPositions()
                   {
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
-                     trade.PositionModify(ticket, newSL, tp);
+                     // FIX: Issue #7 - Retry PositionModify up to 3 times after partial close
+                     bool modifyOk = false;
+                     for(int retry = 0; retry < 3; retry++)
+                     {
+                        if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
+                        Sleep(100);
+                     }
+                     if(!modifyOk)
+                        Print("WARNING: PositionModify failed after 3 retries for SELL ticket ", ticket, " SL=", newSL);
                      Print("GOLD 半利確 SELL: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
             }
          }
 
+         // FIX: Issue #8 - Breakeven and trailing are now sequential (not else-if)
          // 建値移動
          if(profitDist >= beDist && (sl > openPrice || sl == 0))
          {
             double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
-            trade.PositionModify(ticket, newSL, tp);
+            if(trade.PositionModify(ticket, newSL, tp))
+               sl = newSL; // Update local SL for trailing check below
          }
-         // トレーリング
-         else if(profitDist >= beDist * 1.5)
+         // トレーリング — now checked after breakeven (sequential)
+         if(profitDist >= beDist * 1.5)
          {
             double newSL = NormalizeDouble(ask + trailStep, _Digits);
             if(newSL < sl - 5 * _Point || sl == 0)
@@ -1901,6 +1981,7 @@ void ManageOpenPositions()
 //+------------------------------------------------------------------+
 //| 半利確トラッキング                                                  |
 //+------------------------------------------------------------------+
+// FIX: Issue #13 - Robust partial close tracking with stale entry cleanup
 bool IsPartialClosed(ulong ticket)
 {
    for(int i = 0; i < ArraySize(partialClosedTickets); i++)
@@ -1910,16 +1991,47 @@ bool IsPartialClosed(ulong ticket)
 
 void MarkPartialClosed(ulong ticket)
 {
+   // FIX: Issue #13 - Clean up tickets for positions that are no longer open
+   CleanupPartialClosedTickets();
+
    int sz = ArraySize(partialClosedTickets);
    ArrayResize(partialClosedTickets, sz + 1);
    partialClosedTickets[sz] = ticket;
+}
 
-   if(sz > 100)
+// FIX: Issue #13 - Remove stale entries from partialClosedTickets
+void CleanupPartialClosedTickets()
+{
+   int sz = ArraySize(partialClosedTickets);
+   if(sz == 0) return;
+
+   ulong cleanTickets[];
+   int cleanCount = 0;
+
+   for(int i = 0; i < sz; i++)
    {
-      for(int i = 0; i < 50; i++)
-         partialClosedTickets[i] = partialClosedTickets[i + 50];
-      ArrayResize(partialClosedTickets, sz - 49);
+      // Check if this ticket still corresponds to an open position
+      bool stillOpen = false;
+      for(int p = PositionsTotal() - 1; p >= 0; p--)
+      {
+         ulong posTicket = PositionGetTicket(p);
+         if(posTicket == partialClosedTickets[i])
+         {
+            stillOpen = true;
+            break;
+         }
+      }
+      if(stillOpen)
+      {
+         cleanCount++;
+         ArrayResize(cleanTickets, cleanCount);
+         cleanTickets[cleanCount - 1] = partialClosedTickets[i];
+      }
    }
+
+   ArrayResize(partialClosedTickets, cleanCount);
+   for(int i = 0; i < cleanCount; i++)
+      partialClosedTickets[i] = cleanTickets[i];
 }
 
 //+------------------------------------------------------------------+
@@ -1931,6 +2043,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 {
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
+      // FIX: Issue #19 - Call HistorySelect before accessing deal history
+      HistorySelect(0, TimeCurrent());
       if(HistoryDealSelect(trans.deal))
       {
          long dealMagic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
@@ -1938,15 +2052,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
 
          // v12.1: Store component mask when position is opened
+         // CRITICAL #2 FIX: Parse CM from deal comment instead of g_pendingComponentMask
          if(dealMagic == MagicNumber && dealEntry == DEAL_ENTRY_IN)
          {
             ulong posID = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-            if(posID > 0 && g_pendingComponentMask != 0)
+            if(posID > 0)
             {
-               int idx = g_trackCount % COMP_TRACK_MAX;
-               g_trackPosIDs[idx] = posID;
-               g_trackMasks[idx]  = g_pendingComponentMask;
-               g_trackCount++;
+               string dealComment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+               int cmMask = ParseComponentMaskFromComment(dealComment);
+               if(cmMask != 0)
+               {
+                  int idx = g_trackCount % COMP_TRACK_MAX;
+                  g_trackPosIDs[idx] = posID;
+                  g_trackMasks[idx]  = cmMask;
+                  g_trackCount++;
+               }
             }
          }
 
@@ -1956,6 +2076,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             if(dealReason == DEAL_REASON_SL)
             {
                lastSLTime = TimeCurrent();
+               // FIX: Issue #22 - Persist lastSLTime across EA restarts
+               GlobalVariableSet("AGMTF_" + IntegerToString(MagicNumber) + "_lastSL", (double)lastSLTime);
                Print("SLクールダウン開始: ", CooldownMinutes, "分間エントリー停止");
             }
 
@@ -1995,10 +2117,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         if(isWin) g_compWins[c]++;
                         // Cap at rolling window of ~100 trades per component
                         // to keep stats recent (decay oldest by halving)
+                        // FIX: Issue #15 - Remove +1 bias that distorts win rates during decay
                         if(g_compTotal[c] > 100)
                         {
-                           g_compWins[c]  = (g_compWins[c] + 1) / 2;
-                           g_compTotal[c] = (g_compTotal[c] + 1) / 2;
+                           g_compWins[c]  = g_compWins[c] / 2;
+                           g_compTotal[c] = g_compTotal[c] / 2;
                         }
                      }
                   }
@@ -2025,7 +2148,17 @@ bool IsNewsTime()
       if(CalendarEventById(values[i].event_id, event))
       {
          if(event.importance == CALENDAR_IMPORTANCE_HIGH)
+         {
+            // FIX: Issue #10 - Only block for Gold-relevant currencies (USD, EUR, XAU)
+            MqlCalendarCountry country;
+            if(CalendarCountryById(event.country_id, country))
+            {
+               string cur = country.currency;
+               if(cur != "USD" && cur != "EUR" && cur != "XAU")
+                  continue;
+            }
             return true;
+         }
       }
    }
    return false;
@@ -2105,10 +2238,18 @@ void CheckStaleTradeExit()
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       double hours = (double)(TimeCurrent() - openTime) / 3600.0;
 
-      if(hours >= StaleTradeHours && PositionGetDouble(POSITION_PROFIT) >= 0)
+      // FIX: Issue #18 - Close profitable stale trades at StaleTradeHours,
+      // and force-close unprofitable stale trades at StaleTradeHours * 2
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      if(hours >= StaleTradeHours && profit >= 0)
       {
          trade.PositionClose(ticket);
-         Print("v4.0: 塩漬けトレード決済 (", DoubleToString(hours,1), "時間経過)");
+         Print("v4.0: 塩漬けトレード決済 (", DoubleToString(hours,1), "時間経過, profit>=0)");
+      }
+      else if(hours >= StaleTradeHours * 2)
+      {
+         trade.PositionClose(ticket);
+         Print("v4.0: 塩漬けトレード強制決済 (", DoubleToString(hours,1), "時間経過, profit=", DoubleToString(profit,2), ")");
       }
    }
 }
@@ -2144,9 +2285,10 @@ int GetVolumeClimax()
 {
    if(!UseVolumeClimax) return 0;
 
+   // CRITICAL #5 FIX: Use bar 1 (last confirmed bar) instead of bar 0
    long vol[];
    ArraySetAsSeries(vol, true);
-   if(CopyTickVolume(_Symbol, PERIOD_M15, 0, 21, vol) < 21) return 0;
+   if(CopyTickVolume(_Symbol, PERIOD_M15, 1, 22, vol) < 22) return 0;
 
    double sum = 0;
    for(int i = 1; i <= 20; i++) sum += (double)vol[i];
@@ -2154,10 +2296,11 @@ int GetVolumeClimax()
 
    if(avgVol > 0 && (double)vol[0] > avgVol * 2.0)
    {
-      double c0 = iClose(_Symbol, PERIOD_M15, 0);
       double c1 = iClose(_Symbol, PERIOD_M15, 1);
-      if(c0 > c1) return 1;   // Bullish climax
-      if(c0 < c1) return -1;  // Bearish climax
+      double c2 = iClose(_Symbol, PERIOD_M15, 2);
+      double o1 = iOpen(_Symbol, PERIOD_M15, 1);
+      if(c1 > o1 && c1 > c2) return 1;   // Bullish climax
+      if(c1 < o1 && c1 < c2) return -1;  // Bearish climax
    }
    return 0;
 }
@@ -2191,6 +2334,21 @@ bool CheckReversal(int &reversalDirection)
    }
 
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| CRITICAL #2 FIX: コメント文字列からCM=値をパース                    |
+//+------------------------------------------------------------------+
+int ParseComponentMaskFromComment(string comment)
+{
+   int cmPos = StringFind(comment, "|CM=");
+   if(cmPos < 0) return 0;
+   string cmStr = StringSubstr(comment, cmPos + 4);
+   // Truncate at next | if any
+   int nextPipe = StringFind(cmStr, "|");
+   if(nextPipe >= 0)
+      cmStr = StringSubstr(cmStr, 0, nextPipe);
+   return (int)StringToInteger(cmStr);
 }
 
 //+------------------------------------------------------------------+
