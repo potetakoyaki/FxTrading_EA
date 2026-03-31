@@ -129,7 +129,7 @@ const bool   UseEquityCurveFilter = true;  // HARDCODED: WFA検証済みtrue
 const bool   UseAdaptiveSizing = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseMomentumBurst  = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseVolumeClimax   = false;    // HARDCODED: WFA検証済み (false=無効, WR34%ノイズ)
-const bool   UseReversalMode   = true;     // HARDCODED: WFA検証済みtrue
+const bool   UseReversalMode   = false;    // DISABLED: v13.0段階的リバーサルが72%のトレードを生成し赤字化の原因
 // WARNING: 以下のv9-v12機能はMQ5独自でPython WFA未検証
 // MT5テストで効果を確認してからONにすること
 const bool   UseTimeDecaySL    = false;    // v9.0 時間減衰SL（MQ5独自、未検証）
