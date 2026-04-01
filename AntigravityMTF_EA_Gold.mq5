@@ -20,7 +20,7 @@
 // modified. This makes Python and MT5 produce identical results.
 // Partial close at 50% TP distance (1.25 * ATR) is the only post-entry action.
 #property copyright "Antigravity Trading System"
-#property version   "15.00"
+#property version   "15.10"
 #property description "XAUUSD専用 v15.0: SimpleExitMode - Fixed SL/TP only, no BE/Trail/Chandelier. Python-MT5 parity."
 
 #include <Trade/Trade.mqh>
@@ -72,7 +72,7 @@ input int    StaleTradeHours   = 48;       // 塩漬け決済(時間)
 input double DailyMaxLossPct   = 2.0;      // 日次最大損失%
 
 input group "=== 半利確 ==="
-input bool   UsePartialClose   = true;     // 半分利確を有効化
+input bool   UsePartialClose   = false;    // v15.1: 固定SL/TPでは半利確は逆効果（WFA検証済み）
 input double PartialCloseRatio = 0.5;      // 利確するポジション割合
 input double PartialTP_Ratio   = 0.5;      // TP距離の何%で半利確
 
