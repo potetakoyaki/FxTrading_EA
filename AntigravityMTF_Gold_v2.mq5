@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_Gold_v2.mq5          |
 //|            XAUUSD Simplified EA - 4-Component Scoring            |
-//|            v2.0: Fixed SL/TP + Signal Exit + Stale/Weekend       |
+//|            v2.1: Optimized SL/TP + BuyOnly + OnTester            |
 //|            Design: Judge's Verdict - Deterministic exits only    |
 //+------------------------------------------------------------------+
 // DESIGN RATIONALE:
@@ -11,11 +11,15 @@
 // - Stale Exit: 48h + profit >= 0
 // - Weekend Close: Friday 20:00 server time
 // - NO BE, NO trailing, NO chandelier, NO partial close
-// - Total: ~600 lines, Python-MT5 parity guaranteed
+// - v2.1 CHANGES (Python WFA optimized, 72 combos tested):
+//   - BuyOnly=true default (SELL PF=1.03 → not worth taking)
+//   - TP reduced 2.5→2.0 (tighter TP improves WR 51%→56%)
+//   - Added OnTester() for MT5 optimizer (PF+DD+trades composite)
+//   - WFA: 8/16 → 12/16 pass, PF: 1.31 → 1.50
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "2.00"
-#property description "XAUUSD v2.0: 4-Component Scoring, Fixed SL/TP, Signal Exit. Deterministic."
+#property version   "2.10"
+#property description "XAUUSD v2.1: 4-Component Scoring, BuyOnly, TP=2.0*ATR, OnTester. Python-optimized."
 
 #include <Trade/Trade.mqh>
 
@@ -25,8 +29,9 @@
 input group "=== Risk Management ==="
 input double RiskPercent      = 0.75;      // Risk % per trade
 input double SL_ATR_Multi     = 1.5;       // SL = H4 ATR(14) x multiplier
-input double TP_ATR_Multi     = 2.5;       // TP = H4 ATR(14) x multiplier
+input double TP_ATR_Multi     = 2.0;       // TP = H4 ATR(14) x multiplier (v2.1: 2.5→2.0, WFA 8→12/16)
 input int    MinEntryScore    = 4;         // Minimum entry score (max 9)
+input bool   BuyOnly          = true;      // v2.1: BUY only (SELL PF=1.03, not worth taking)
 input int    MagicNumber      = 20260401;  // Magic number
 
 input group "=== Filters ==="
@@ -123,11 +128,12 @@ int OnInit()
 
    lastBarTime = 0;
 
-   Print("AntigravityMTF Gold v2.0 initialized");
+   Print("AntigravityMTF Gold v2.1 initialized");
    Print("  SL=ATR*", DoubleToString(SL_ATR_Multi, 1),
          " TP=ATR*", DoubleToString(TP_ATR_Multi, 1),
          " MinScore=", MinEntryScore,
-         " ADX>=", H4_ADX_Threshold);
+         " ADX>=", H4_ADX_Threshold,
+         " BuyOnly=", BuyOnly);
    Print("  Hours=", TradeStartHour, "-", TradeEndHour,
          " Cooldown=", CooldownMinutes, "min",
          " Stale=", StaleTradeHours, "h",
@@ -146,6 +152,32 @@ void OnDeinit(const int reason)
    if(h_h1_rsi   != INVALID_HANDLE) IndicatorRelease(h_h1_rsi);
    if(h_h4_rsi   != INVALID_HANDLE) IndicatorRelease(h_h4_rsi);
    if(h_h4_atr   != INVALID_HANDLE) IndicatorRelease(h_h4_atr);
+}
+
+//+------------------------------------------------------------------+
+//| OnTester - Custom optimization criterion for MT5 Strategy Tester |
+//| Composite score: PF (40pt) + DD (30pt) + Trades (15pt) + Profit |
+//| Rejects: <50 trades, >25% DD, PF<1.0                            |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+   double pf     = TesterStatistics(STAT_PROFIT_FACTOR);
+   double dd     = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+   double trades = TesterStatistics(STAT_TRADES);
+   double profit = TesterStatistics(STAT_PROFIT);
+
+   //--- Hard filters: reject bad configurations
+   if(trades < 50)  return -1000;
+   if(dd > 25.0)    return -500;
+   if(pf < 1.0)     return -100;
+
+   //--- Composite score (0-100)
+   double score = MathMin(pf, 4.0) / 4.0 * 40          // PF component (max 40)
+                + MathMax(0, (25 - dd) / 25) * 30       // DD component (max 30)
+                + MathMin(trades / 200, 1) * 15          // Trade count (max 15)
+                + (profit > 0 ? 15 : 0);                 // Profitability (max 15)
+
+   return score;
 }
 
 //+------------------------------------------------------------------+
@@ -221,6 +253,9 @@ void OnTick()
    bool canBuy  = (totalBuy  >= MinEntryScore && totalBuy  > totalSell);
    bool canSell = (totalSell >= MinEntryScore && totalSell > totalBuy);
 
+   //--- v2.1: BuyOnly filter
+   if(BuyOnly) canSell = false;
+
    if(!canBuy && !canSell) return;
 
    //--- Calculate SL/TP distances
@@ -246,7 +281,7 @@ void OnTick()
       double lots = CalcLotSize(ask, slDist);
 
       //--- Store entry slope direction for Signal Exit
-      string comment = "v2|B|" + IntegerToString(slopeDir);
+      string comment = "v21|B|" + IntegerToString(slopeDir);
 
       if(trade.Buy(lots, _Symbol, ask, sl, tp, comment))
       {
@@ -255,7 +290,7 @@ void OnTick()
          if(dealTicket > 0)
             StoreEntrySlopeDir(dealTicket, slopeDir);
 
-         Print("GOLD v2 BUY: lots=", DoubleToString(lots, 2),
+         Print("GOLD v2.1 BUY: lots=", DoubleToString(lots, 2),
                " ask=", DoubleToString(ask, _Digits),
                " SL=", DoubleToString(sl, _Digits),
                " TP=", DoubleToString(tp, _Digits),
@@ -265,7 +300,7 @@ void OnTick()
       }
       else
       {
-         Print("GOLD v2 BUY FAILED: error=", GetLastError(),
+         Print("GOLD v2.1 BUY FAILED: error=", GetLastError(),
                " retcode=", trade.ResultRetcode(),
                " comment=", trade.ResultComment());
       }
@@ -281,7 +316,7 @@ void OnTick()
       double lots = CalcLotSize(bid, slDist);
 
       //--- Store entry slope direction for Signal Exit
-      string comment = "v2|S|" + IntegerToString(slopeDir);
+      string comment = "v21|S|" + IntegerToString(slopeDir);
 
       if(trade.Sell(lots, _Symbol, bid, sl, tp, comment))
       {
@@ -289,7 +324,7 @@ void OnTick()
          if(dealTicket > 0)
             StoreEntrySlopeDir(dealTicket, slopeDir);
 
-         Print("GOLD v2 SELL: lots=", DoubleToString(lots, 2),
+         Print("GOLD v2.1 SELL: lots=", DoubleToString(lots, 2),
                " bid=", DoubleToString(bid, _Digits),
                " SL=", DoubleToString(sl, _Digits),
                " TP=", DoubleToString(tp, _Digits),
@@ -299,7 +334,7 @@ void OnTick()
       }
       else
       {
-         Print("GOLD v2 SELL FAILED: error=", GetLastError(),
+         Print("GOLD v2.1 SELL FAILED: error=", GetLastError(),
                " retcode=", trade.ResultRetcode(),
                " comment=", trade.ResultComment());
       }
@@ -335,7 +370,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    {
       lastSLTime = TimeCurrent();
       GlobalVariableSet(GVKey("lastSL"), (double)(long)lastSLTime);
-      Print("GOLD v2: SL hit, cooldown ", CooldownMinutes, " minutes");
+      Print("GOLD v2.1: SL hit, cooldown ", CooldownMinutes, " minutes");
    }
 
    //--- Clean up stored slope GlobalVariable for closed position
@@ -373,7 +408,7 @@ void ManageOpenPositions()
          if(hours >= StaleTradeHours && profit >= 0)
          {
             if(trade.PositionClose(ticket))
-               Print("GOLD v2: Stale exit (", DoubleToString(hours, 1),
+               Print("GOLD v2.1: Stale exit (", DoubleToString(hours, 1),
                      "h, profit=", DoubleToString(profit, 2), ")");
             continue;
          }
@@ -388,7 +423,7 @@ void ManageOpenPositions()
          if(currentSlope != 0 && currentSlope != entrySlopeDir)
          {
             if(trade.PositionClose(ticket))
-               Print("GOLD v2: Signal exit - slope reversed (",
+               Print("GOLD v2.1: Signal exit - slope reversed (",
                      entrySlopeDir, " -> ", currentSlope,
                      ", profit=", DoubleToString(profit, 2), ")");
             continue;
@@ -630,7 +665,7 @@ void ValidateStopsDistance(double price, double &sl, double &tp, bool isBuy)
 //+------------------------------------------------------------------+
 string GVKey(string suffix)
 {
-   return "AGv2_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
+   return "AGv21_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
 }
 
 //+------------------------------------------------------------------+
@@ -667,9 +702,10 @@ int ReadEntrySlopeDir(ulong posTicket)
       }
    }
 
-   //--- Fallback: parse from trade comment "v2|B|1" or "v2|S|-1"
+   //--- Fallback: parse from trade comment "v21|B|1" or "v2|S|-1"
    string comment = PositionGetString(POSITION_COMMENT);
-   if(StringLen(comment) >= 5 && StringSubstr(comment, 0, 3) == "v2|")
+   if(StringLen(comment) >= 5 &&
+      (StringSubstr(comment, 0, 4) == "v21|" || StringSubstr(comment, 0, 3) == "v2|"))
    {
       //--- Find last '|' and parse slope direction
       int lastPipe = -1;
