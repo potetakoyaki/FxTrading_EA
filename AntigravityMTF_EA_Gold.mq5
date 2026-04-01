@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v14.1: Fix entry ATR storage via GlobalVariable         |
+//|            v14.2: Widen BE/Trail to allow TP hits on MT5           |
 //+------------------------------------------------------------------+
 // CODEX-FIX: NEW HIGH #9 - Structural overfit risk documentation
 // This EA uses 47 input parameters and ~200 hardcoded parameters across 15 scoring
@@ -12,8 +12,8 @@
 //   4. Most parameters are hardcoded at WFA-validated defaults to prevent over-optimization
 // Traders should re-run WFA periodically (quarterly) and monitor live vs backtest divergence.
 #property copyright "Antigravity Trading System"
-#property version   "14.10"
-#property description "XAUUSD専用 v14.1: Entry ATR/Regime stored in GlobalVariable (comment truncation fix)"
+#property version   "14.20"
+#property description "XAUUSD専用 v14.2: Widen BE/Trail defaults (BE=1.5, Trail=1.5) to allow TP hits on MT5 tick-by-tick execution"
 
 #include <Trade/Trade.mqh>
 
@@ -40,8 +40,8 @@ input double DDHalfRiskPct     = 2.5;      // DD%でリスク半減
 input group "=== 損益設定（ATRベース） ==="
 input double SL_ATR_Multi      = 1.2;      // SL = M15 ATR x 倍率 (WFA: 1.2, PF+0.36)
 input double TP_ATR_Multi      = 4.0;      // TP = M15 ATR x 倍率 (WFA: 4.0, トレンド追従)
-input double Trail_ATR_Multi   = 1.0;      // トレーリング = ATR x 倍率
-input double BE_ATR_Multi      = 0.8;      // 建値移動 = ATR x 倍率 (WFA: 0.8, 早期資本保護)
+input double Trail_ATR_Multi   = 1.5;      // トレーリング = ATR x 倍率 (v14.2: 1.0→1.5, MT5 tick-by-tick でTP到達可能に)
+input double BE_ATR_Multi      = 1.5;      // 建値移動 = ATR x 倍率 (v14.2: 0.8→1.5, プルバック耐性向上)
 input double MinSL_Points      = 200.0;    // 最小SL (ポイント)
 input double MaxSL_Points      = 1500.0;   // 最大SL (ポイント)
 
@@ -548,7 +548,7 @@ int OnInit()
    g_tqCount = 0;
    g_tqIndex = 0;
 
-   Print("AntigravityMTF EA [GOLD] v14.1 初期化完了");
+   Print("AntigravityMTF EA [GOLD] v14.2 初期化完了");
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
