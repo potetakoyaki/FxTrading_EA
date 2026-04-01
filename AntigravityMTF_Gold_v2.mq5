@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_Gold_v2.mq5          |
-//|            XAUUSD Simplified EA - 5-Component Scoring            |
-//|            v2.2: Optimizer-Ready with expanded inputs            |
+//|            XAUUSD Simplified EA - 6-Component Scoring            |
+//|            v2.3: +H1 BB Bounce component                        |
 //|            Design: Judge's Verdict - Deterministic exits only    |
 //+------------------------------------------------------------------+
 // DESIGN RATIONALE:
-// - 5 scoring components (max 11 points with H1 MA cross) + ADX gate
+// - 6 scoring components (max 12 points with H1 MA cross + BB bounce) + ADX gate
 // - Fixed SL/TP (ATR-based, never modified after entry)
 // - Signal Exit: H4 SMA50 slope reversal -> close at market
 // - Stale Exit: 48h + profit >= 0
@@ -23,6 +23,10 @@
 //   - Added optimization range comments for all key parameters
 //   - OnTester() enhanced with win-rate component
 //   - TradeStartHour/TradeEndHour with optimization ranges
+// - v2.3 CHANGES (H1 BB Bounce):
+//   - Added H1 Bollinger Band bounce as optional 6th scoring component (+1pt)
+//   - Near lower band + turning up -> BUY; near upper band + turning down -> SELL
+//   - Max score: 9 base + 2 (H1 MA) + 1 (BB) = 12
 //+------------------------------------------------------------------+
 //
 // === MT5 OPTIMIZER INSTRUCTIONS ===
@@ -40,7 +44,7 @@
 // === RECOMMENDED OPTIMIZATION PRIORITY ===
 // Phase 1 (Core): SL_ATR_Multi, TP_ATR_Multi, MinEntryScore
 // Phase 2 (Filters): ADXThreshold, TradeStartHour, TradeEndHour
-// Phase 3 (Signals): H4SlopePeriod, RSIMomLookback, UseH1MACross
+// Phase 3 (Signals): H4SlopePeriod, RSIMomLookback, UseH1MACross, UseH1BBBounce
 // Phase 4 (Mode): BuyOnly, UseSignalExit
 //
 // === PARAMETER OPTIMIZATION RANGES ===
@@ -48,8 +52,8 @@
 //
 //+------------------------------------------------------------------+
 #property copyright "Antigravity Trading System"
-#property version   "2.20"
-#property description "XAUUSD v2.2: 5-Component Scoring, Optimizer-Ready. MT5 genetic optimization support."
+#property version   "2.30"
+#property description "XAUUSD v2.3: 6-Component Scoring, +H1 BB Bounce. MT5 genetic optimization support."
 
 #include <Trade/Trade.mqh>
 
@@ -69,6 +73,7 @@ input int    ADXThreshold     = 25;        // ADX gate threshold (20|5|35)
 input int    H4SlopePeriod    = 20;        // H4 SMA slope lookback bars (10|5|30)
 input int    RSIMomLookback   = 3;         // RSI momentum lookback bars (2|1|5)
 input bool   UseH1MACross    = true;       // Add H1 MA cross component (+2pt)
+input bool   UseH1BBBounce   = true;       // v2.3: Add H1 BB bounce component (+1pt, WFA+1, PF+0.34)
 
 input group "=== Trade Mode ==="
 input bool   BuyOnly          = true;      // BUY only mode (true|false)
@@ -111,6 +116,7 @@ int            h_h4_rsi;         // H4 RSI(14) handle
 int            h_h4_atr;         // H4 ATR(14) handle
 int            h_h1_ema_fast;    // H1 EMA(10) handle
 int            h_h1_ema_slow;    // H1 EMA(30) handle
+int            h_h1_bb;          // v2.3: H1 BB(20,2) handle
 datetime       lastBarTime;      // Last processed M15 bar time
 datetime       lastSLTime;       // Last SL hit time (for cooldown)
 
@@ -143,9 +149,9 @@ int OnInit()
       Print("ERROR: RSIMomLookback must be 1-20, got ", RSIMomLookback);
       return INIT_PARAMETERS_INCORRECT;
    }
-   if(MinEntryScore < 1 || MinEntryScore > 11)
+   if(MinEntryScore < 1 || MinEntryScore > 12)
    {
-      Print("ERROR: MinEntryScore must be 1-11, got ", MinEntryScore);
+      Print("ERROR: MinEntryScore must be 1-12, got ", MinEntryScore);
       return INIT_PARAMETERS_INCORRECT;
    }
    if(TradeStartHour < 0 || TradeStartHour > 23 || TradeEndHour < 1 || TradeEndHour > 24)
@@ -182,12 +188,14 @@ int OnInit()
    h_h4_atr   = iATR(_Symbol, PERIOD_H4, H4_ATR_Period);
    h_h1_ema_fast = iMA(_Symbol, PERIOD_H1, H1_EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
    h_h1_ema_slow = iMA(_Symbol, PERIOD_H1, H1_EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   h_h1_bb       = iBands(_Symbol, PERIOD_H1, 20, 0, 2.0, PRICE_CLOSE);
 
    //--- Validate all handles
    if(h_h4_sma50 == INVALID_HANDLE || h_h4_adx == INVALID_HANDLE ||
       h_h1_rsi == INVALID_HANDLE   || h_h4_rsi == INVALID_HANDLE ||
       h_h4_atr == INVALID_HANDLE   ||
-      h_h1_ema_fast == INVALID_HANDLE || h_h1_ema_slow == INVALID_HANDLE)
+      h_h1_ema_fast == INVALID_HANDLE || h_h1_ema_slow == INVALID_HANDLE ||
+      h_h1_bb == INVALID_HANDLE)
    {
       Print("ERROR: Failed to create indicator handles.");
       if(h_h4_sma50    != INVALID_HANDLE) IndicatorRelease(h_h4_sma50);
@@ -197,6 +205,7 @@ int OnInit()
       if(h_h4_atr      != INVALID_HANDLE) IndicatorRelease(h_h4_atr);
       if(h_h1_ema_fast != INVALID_HANDLE) IndicatorRelease(h_h1_ema_fast);
       if(h_h1_ema_slow != INVALID_HANDLE) IndicatorRelease(h_h1_ema_slow);
+      if(h_h1_bb       != INVALID_HANDLE) IndicatorRelease(h_h1_bb);
       return INIT_FAILED;
    }
 
@@ -207,8 +216,10 @@ int OnInit()
 
    lastBarTime = 0;
 
-   int maxScore = UseH1MACross ? 11 : 9;
-   Print("AntigravityMTF Gold v2.2 initialized (Optimizer-Ready)");
+   int maxScore = 9;
+   if(UseH1MACross) maxScore += 2;
+   if(UseH1BBBounce) maxScore += 1;
+   Print("AntigravityMTF Gold v2.3 initialized (+H1 BB Bounce)");
    Print("  SL=ATR*", DoubleToString(SL_ATR_Multi, 2),
          " TP=ATR*", DoubleToString(TP_ATR_Multi, 2),
          " MinScore=", MinEntryScore, "/", maxScore,
@@ -217,6 +228,7 @@ int OnInit()
    Print("  H4SlopePeriod=", H4SlopePeriod,
          " RSIMomLookback=", RSIMomLookback,
          " H1MACross=", UseH1MACross,
+         " H1BBBounce=", UseH1BBBounce,
          " SignalExit=", UseSignalExit);
    Print("  Hours=", TradeStartHour, "-", TradeEndHour,
          " Cooldown=", CooldownMinutes, "min",
@@ -238,6 +250,7 @@ void OnDeinit(const int reason)
    if(h_h4_atr      != INVALID_HANDLE) IndicatorRelease(h_h4_atr);
    if(h_h1_ema_fast != INVALID_HANDLE) IndicatorRelease(h_h1_ema_fast);
    if(h_h1_ema_slow != INVALID_HANDLE) IndicatorRelease(h_h1_ema_slow);
+   if(h_h1_bb       != INVALID_HANDLE) IndicatorRelease(h_h1_bb);
 }
 
 //+------------------------------------------------------------------+
@@ -346,6 +359,28 @@ void OnTick()
       else if(maCross < 0)  { sellScore += 2; sellReasons += "H1MAv2 "; }
    }
 
+   //--- Component 6: H1 BB Bounce (+1pt)
+   if(UseH1BBBounce)
+   {
+      double bbUpper = GetIndicatorValue(h_h1_bb, 1, 1);  // Upper band, shift 1
+      double bbLower = GetIndicatorValue(h_h1_bb, 2, 1);  // Lower band, shift 1
+      double h1Close = iClose(_Symbol, PERIOD_H1, 1);
+      double h1PrevClose = iClose(_Symbol, PERIOD_H1, 2);
+
+      if(bbUpper > 0 && bbLower > 0)
+      {
+         double bbWidth = bbUpper - bbLower;
+         if(bbWidth > 0)
+         {
+            double bbPos = (h1Close - bbLower) / bbWidth;
+            // Near lower band AND turning up -> BUY
+            if(bbPos < 0.2 && h1Close > h1PrevClose) { buyScore += 1; buyReasons += "BBv1 "; }
+            // Near upper band AND turning down -> SELL
+            if(bbPos > 0.8 && h1Close < h1PrevClose) { sellScore += 1; sellReasons += "BBv1 "; }
+         }
+      }
+   }
+
    //--- Entry decision
    int totalBuy  = buyScore;
    int totalSell = sellScore;
@@ -370,7 +405,9 @@ void OnTick()
       slDist = MaxSL_Points * _Point;
 
    //--- Max score for logging
-   int maxScore = UseH1MACross ? 11 : 9;
+   int maxScore = 9;
+   if(UseH1MACross) maxScore += 2;
+   if(UseH1BBBounce) maxScore += 1;
 
    //--- Execute trade
    if(canBuy)
@@ -384,7 +421,7 @@ void OnTick()
       double lots = CalcLotSize(ask, slDist);
 
       //--- Store entry slope direction for Signal Exit
-      string comment = "v22|B|" + IntegerToString(slopeDir);
+      string comment = "v23|B|" + IntegerToString(slopeDir);
 
       if(trade.Buy(lots, _Symbol, ask, sl, tp, comment))
       {
@@ -393,7 +430,7 @@ void OnTick()
          if(dealTicket > 0)
             StoreEntrySlopeDir(dealTicket, slopeDir);
 
-         Print("GOLD v2.2 BUY: lots=", DoubleToString(lots, 2),
+         Print("GOLD v2.3 BUY: lots=", DoubleToString(lots, 2),
                " ask=", DoubleToString(ask, _Digits),
                " SL=", DoubleToString(sl, _Digits),
                " TP=", DoubleToString(tp, _Digits),
@@ -403,7 +440,7 @@ void OnTick()
       }
       else
       {
-         Print("GOLD v2.2 BUY FAILED: error=", GetLastError(),
+         Print("GOLD v2.3 BUY FAILED: error=", GetLastError(),
                " retcode=", trade.ResultRetcode(),
                " comment=", trade.ResultComment());
       }
@@ -419,7 +456,7 @@ void OnTick()
       double lots = CalcLotSize(bid, slDist);
 
       //--- Store entry slope direction for Signal Exit
-      string comment = "v22|S|" + IntegerToString(slopeDir);
+      string comment = "v23|S|" + IntegerToString(slopeDir);
 
       if(trade.Sell(lots, _Symbol, bid, sl, tp, comment))
       {
@@ -427,7 +464,7 @@ void OnTick()
          if(dealTicket > 0)
             StoreEntrySlopeDir(dealTicket, slopeDir);
 
-         Print("GOLD v2.2 SELL: lots=", DoubleToString(lots, 2),
+         Print("GOLD v2.3 SELL: lots=", DoubleToString(lots, 2),
                " bid=", DoubleToString(bid, _Digits),
                " SL=", DoubleToString(sl, _Digits),
                " TP=", DoubleToString(tp, _Digits),
@@ -437,7 +474,7 @@ void OnTick()
       }
       else
       {
-         Print("GOLD v2.2 SELL FAILED: error=", GetLastError(),
+         Print("GOLD v2.3 SELL FAILED: error=", GetLastError(),
                " retcode=", trade.ResultRetcode(),
                " comment=", trade.ResultComment());
       }
@@ -473,7 +510,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    {
       lastSLTime = TimeCurrent();
       GlobalVariableSet(GVKey("lastSL"), (double)(long)lastSLTime);
-      Print("GOLD v2.2: SL hit, cooldown ", CooldownMinutes, " minutes");
+      Print("GOLD v2.3: SL hit, cooldown ", CooldownMinutes, " minutes");
    }
 
    //--- Clean up stored slope GlobalVariable for closed position
@@ -511,7 +548,7 @@ void ManageOpenPositions()
          if(hours >= StaleTradeHours && profit >= 0)
          {
             if(trade.PositionClose(ticket))
-               Print("GOLD v2.2: Stale exit (", DoubleToString(hours, 1),
+               Print("GOLD v2.3: Stale exit (", DoubleToString(hours, 1),
                      "h, profit=", DoubleToString(profit, 2), ")");
             continue;
          }
@@ -528,7 +565,7 @@ void ManageOpenPositions()
             if(currentSlope != 0 && currentSlope != entrySlopeDir)
             {
                if(trade.PositionClose(ticket))
-                  Print("GOLD v2.2: Signal exit - slope reversed (",
+                  Print("GOLD v2.3: Signal exit - slope reversed (",
                         entrySlopeDir, " -> ", currentSlope,
                         ", profit=", DoubleToString(profit, 2), ")");
                continue;
@@ -788,7 +825,7 @@ void ValidateStopsDistance(double price, double &sl, double &tp, bool isBuy)
 //+------------------------------------------------------------------+
 string GVKey(string suffix)
 {
-   return "AGv22_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
+   return "AGv23_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
 }
 
 //+------------------------------------------------------------------+
@@ -825,10 +862,11 @@ int ReadEntrySlopeDir(ulong posTicket)
       }
    }
 
-   //--- Fallback: parse from trade comment "v22|B|1" or "v21|S|-1"
+   //--- Fallback: parse from trade comment "v23|B|1" or "v22|S|-1"
    string comment = PositionGetString(POSITION_COMMENT);
    if(StringLen(comment) >= 5 &&
-      (StringSubstr(comment, 0, 4) == "v22|" ||
+      (StringSubstr(comment, 0, 4) == "v23|" ||
+       StringSubstr(comment, 0, 4) == "v22|" ||
        StringSubstr(comment, 0, 4) == "v21|" ||
        StringSubstr(comment, 0, 3) == "v2|"))
    {
