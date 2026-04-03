@@ -1,29 +1,16 @@
 """
-AntigravityMTF EA Gold v10.0 -- Intelligent Regime Engine
+AntigravityMTF EA Gold v4.0 -- Backtester (6 months)
 ATR-based dynamic SL/TP, volatility regime, session bonus, momentum, partial close
 v3.0: USD Correlation, RSI Divergence, S/R Levels, Candle Patterns, H4 RSI,
       Chandelier Exit, Equity Curve Filter, Adaptive Sizing (Half-Kelly)
 v4.0: News Filter, Dynamic Spread, Weekend Close, 4-State Regime (Crash/Ranging/Trending/Volatile),
       Stale Trade Exit, Daily Circuit Breaker, Momentum Burst (+3pt), Volume Climax (+2pt),
       Pyramiding (up to 3), Reversal Mode, Risk Metrics (Sharpe/Sortino/Calmar)
-v5.2: Trend-aligned SL + CSV fallback
-v6.0: Professional Grade
-v7.0: Symmetric Trend-Following (Bull/Bear balanced)
-v9.0: Regime-Adaptive Strategy Engine
-v10.0: Intelligent Regime Engine
-      - Regime Transition Smoothing: EMA-blend parameters across regime changes
-      - Dynamic Component Effectiveness: track/adjust component weights by recent accuracy
-      - Session-Regime Interaction: session-specific lot/score modifiers per regime
-      - Adaptive Exit per Regime: regime-tuned partial close, trailing, breakeven
-      - Regime Performance Memory: track per-regime PF and adjust MIN_SCORE dynamically
 """
 
 import pandas as pd
 import numpy as np
-try:
-    import yfinance as yf
-except ImportError:
-    yf = None
+import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
@@ -33,9 +20,9 @@ class GoldConfig:
     SYMBOL = "GC=F"
     INITIAL_BALANCE = 300_000  # 30万円
     RISK_PERCENT = 0.75        # v5.1: 0.5→0.75% バランス型
-    MAX_POSITIONS = 3          # v4.0: changed from 1 for pyramiding
-    MIN_SCORE = 9              # v3.0: was 6 in v2.0, now 9/27
-    COOLDOWN_BARS = 16         # SL後16本(=4時間)エントリー禁止
+    MAX_POSITIONS = 1          # v6.0: pyramid disabled (PF 1.14→1.45, DD 21.6%→11.0%)
+    MIN_SCORE = 12             # v6.0: raised from 9 (PF 1.45→1.61, WR 52.7%→55.5%)
+    COOLDOWN_BARS = 32         # v5.4: SL後32本(=8時間)エントリー禁止 (16→32: DD 14.7%→13.3%)
     MAX_SPREAD_POINTS = 50
     POINT = 0.01               # Gold 1point = $0.01
     MAX_DD_PERCENT = 6.0
@@ -46,10 +33,10 @@ class GoldConfig:
 
     # ATR-based SL/TP (v2.0)
     ATR_PERIOD = 14
-    SL_ATR_MULTI = 1.5
-    TP_ATR_MULTI = 3.5
+    SL_ATR_MULTI = 1.2         # v6.1: tighter SL for better RR (1.5→1.2, PF 1.60→1.96)
+    TP_ATR_MULTI = 4.0         # v8.1: tighter TP (5.0→4.0: WFA 12→13/14 with RTP=5.0)
     TRAIL_ATR_MULTI = 1.0
-    BE_ATR_MULTI = 1.5
+    BE_ATR_MULTI = 0.8         # v6.1: earlier breakeven (1.5→0.8, PF +0.15, protects capital)
     MIN_SL_POINTS = 200
     MAX_SL_POINTS = 1500
 
@@ -57,7 +44,7 @@ class GoldConfig:
     VOL_REGIME_PERIOD = 50
     VOL_REGIME_LOW = 0.7
     VOL_REGIME_HIGH = 1.5
-    HIGH_VOL_SL_BONUS = 0.5
+    HIGH_VOL_SL_BONUS = 0.0    # v6.1: no extra SL in volatile conditions (0.5→0.0, PF +0.07)
 
     # Session bonus (v2.0)
     USE_SESSION_BONUS = True
@@ -75,10 +62,8 @@ class GoldConfig:
     H4_ADX_PERIOD = 14
     H4_ADX_THRESHOLD = 20
     H4_SLOPE_PERIOD = 20          # SMA(50) slope lookback (H4 bars, ~3.5 days)
-    TREND_SL_WIDEN = 1.3           # v5.2: SL widen multiplier for with-trend entries
-    TREND_SL_TIGHTEN = 0.7         # v5.2: SL tighten multiplier for counter-trend entries
-    TREND_TP_EXTEND = 1.2          # v7.0: TP extend multiplier for with-trend entries
-    TREND_TP_TIGHTEN = 0.8         # v7.0: TP tighten multiplier for counter-trend entries
+    TREND_SL_WIDEN = 1.5           # v6.0: widened (was 1.3) for better trend capture
+    TREND_SL_TIGHTEN = 0.6         # v6.0: tightened (was 0.7) for faster counter-trend exit
 
     H1_MA_FAST = 10
     H1_MA_SLOW = 30
@@ -121,7 +106,7 @@ class GoldConfig:
     # v3.0: Chandelier Exit
     USE_CHANDELIER_EXIT = True
     CHANDELIER_PERIOD = 22
-    CHANDELIER_ATR_MULTI = 3.0
+    CHANDELIER_ATR_MULTI = 2.0  # v6.1: tighter chandelier exit (3.0→2.0, locks profit faster)
 
     # v3.0: Equity Curve Filter
     USE_EQUITY_CURVE = True
@@ -147,258 +132,161 @@ class GoldConfig:
 
     # v4.0 Attack
     USE_MOMENTUM_BURST = True
-    USE_VOLUME_CLIMAX = True
-    MAX_PYRAMID_POSITIONS = 3
+    USE_VOLUME_CLIMAX = False              # v6.0: disabled (34% WR, harmful noise)
+    MAX_PYRAMID_POSITIONS = 1  # v6.0: pyramid disabled for quality
     PYRAMID_LOT_DECAY = 0.5
-    HIGH_VOL_PYRAMID_BLOCK = 1.2   # v8.2: lowered from 1.5 (proven: DD 15.1%→10.1%)
     USE_REVERSAL_MODE = True
 
-    # v6.0 Professional
-    # Transaction costs
-    USE_REALISTIC_SPREAD = True      # Use actual spread from CSV data
-    SLIPPAGE_POINTS = 3              # Realistic slippage (0.03 USD on Gold)
-    COMMISSION_PER_LOT = 7.0         # USD per round-trip lot (typical ECN)
+    # v5.3: Hard Session Filter (extreme volatility block)
+    USE_HARD_SESSION_FILTER = True
+    BLOCK_FOMC_HOURS = (18, 21)       # FOMC announcement window (UTC)
+    BLOCK_NFP_HOURS = (13, 15)        # NFP release window (UTC)
+    BLOCK_CPI_HOURS = (13, 15)        # CPI release window (UTC)
+    BLOCK_ASIAN_LOW_LIQ = (0, 3)      # Asian ultra-low liquidity (UTC)
+    BLOCK_SUNDAY_OPEN_HOURS = 3       # Hours after Sunday market open to block
 
-    # Score quality filter
-    SCORE_MARGIN_MIN = 2             # Minimum gap: buy_score - sell_score >= 2
+    # v5.4: Dead Zone Hour Filter -- block structurally unprofitable hours
+    USE_DEAD_ZONE_FILTER = True
+    DEAD_ZONE_ALL_HOURS = {11, 12}           # Block ALL entries (lunch dead zone)
+    DEAD_ZONE_NORMAL_HOURS = {14, 18, 21}    # Block new positions only (session transitions)
 
-    # v10.1: RSI Momentum Confirmation
+    # v5.4: Score 11 Skip -- score=11 consistently underperforms across all years
+    SKIP_SCORE_11 = True
+
+    # v6.0: Session-Regime Adaptive Threshold (SRAT)
+    # Replace fixed MIN_SCORE with per-session base thresholds.
+    # Each session has a statistically-derived base threshold reflecting
+    # its historical profitability. DD escalation and regime+3 stack on top.
+    USE_SRAT = True
+    SRAT_THRESHOLDS = {
+        # hour: base_min_score
+        # London early (8-10): Best session, keep loose
+        # v8.1: SRAT[8]=7 (was 11: WFA 11→13/14, London open is highest-quality session)
+        8: 7, 9: 9, 10: 9,
+        # London mid (11-12): Blocked by dead zone, 13: PF=0.78, raise bar
+        11: 99, 12: 99, 13: 12,
+        # LN/NY overlap (14-16): 14 transition hour, 15-16 decent
+        14: 11, 15: 9, 16: 9,
+        # NY session (17-21): Strong but mixed. 18/21 transition hours.
+        17: 9, 18: 12, 19: 9, 20: 9, 21: 12,
+    }
+
+    # v6.0: Configurable DD escalation thresholds
+    # Start tightening early (6%) to prevent DD from deepening.
+    # (dd_threshold_pct, min_score_override)
+    DD_ESCALATION = [(6, 11), (10, 13), (15, 16), (20, 18)]
+
+    # v6.2: Ranging Regime Adaptation
+    # When H4 ADX < threshold (no clear trend), tighten TP to take quick profits
+    USE_RANGING_ADAPTATION = True
+    RANGING_ADX_THRESHOLD = 20       # v8.0: lowered back to 20 (with RSI_MOM: WFA 13→14/16)
+    RANGING_TP_CAP = 5.0             # v8.1: Relaxed cap (3.5→5.0: WFA 12→13/14, allows bigger ranging wins)
+    RANGING_SCORE_BOOST = 0          # v6.2: disabled, TP cap alone is better for WFA
+
+    # v7.0: Macro-Trend Filter
+    # When H4 shows confirmed directional trend (ADX>=threshold),
+    # block counter-trend entries to prevent bleeding in trending markets
+    USE_MACRO_TREND_FILTER = True
+    MACRO_TREND_ADX_THRESHOLD = 20
+
+    # v8.0: RSI Momentum Confirmation
     # Require H1 RSI to confirm momentum direction before entry
-    # BUY: RSI > 50 AND rising (vs N bars ago), SELL: RSI < 50 AND falling
-    # WFA improvement: 11/16 → 14/16 on v4.0 backtester
+    # BUY: RSI > 50 AND rising (vs N bars ago)
+    # SELL: RSI < 50 AND falling (vs N bars ago)
     USE_RSI_MOMENTUM_CONFIRM = True
     RSI_MOMENTUM_LOOKBACK = 3
 
-    # Time-decay SL tightening
-    USE_TIME_DECAY_SL = True
-    TIME_DECAY_START_BARS = 48       # Start tightening after 12h (48 M15 bars)
-    TIME_DECAY_RATE = 0.85           # SL shrinks to 85% per 12h
+    # v7.0: Range-Reversion Strategy
+    # Activates ONLY when H4 ADX < RANGING_ADX_THRESHOLD (ranging market detected)
+    # Uses mean-reversion signals (BB bounce, RSI extreme, S/R) instead of trend-following
+    USE_RANGE_REVERSION = True
+    RANGE_BB_ENABLED = True
+    RANGE_RSI_OVERSOLD = 30
+    RANGE_RSI_OVERBOUGHT = 70
+    RANGE_TP_ATR_MULTI = 2.0        # Tight TP for range trades (small moves)
+    RANGE_SL_ATR_MULTI = 1.0        # Tight SL for quick exit on breakout
+    RANGE_RISK_MULTIPLIER = 0.5     # Reduced position size for safety
+    RANGE_MIN_CONFIRMATIONS = 2     # Need at least 2 of: BB bounce, RSI extreme, S/R level
 
-    # Enhanced trailing (ATR ratchet)
-    USE_ATR_RATCHET_TRAIL = True
-    RATCHET_STEP_ATR = 0.5           # Tighten trail by 0.5 ATR per ATR of profit
+    # v8.0: Structural Algorithm Changes
 
-    # Walk-forward
-    WF_TRAIN_MONTHS = 6              # Training window
-    WF_TEST_MONTHS = 2               # OOS test window
-    WF_STEP_MONTHS = 2               # Step size
+    # v8.0a: Volatility Trend Filter
+    # Rising ATR without trend = danger (choppy); Rising ATR with trend = opportunity
+    USE_VOL_TREND_FILTER = False
+    VOL_TREND_LOOKBACK = 10          # ATR slope lookback (M15 bars)
+    VOL_TREND_EXPANSION_BLOCK = True # Block entries when ATR expanding but no H4 trend
 
-    # Monte Carlo
-    MC_SIMULATIONS = 1000
-    MC_CONFIDENCE = 0.95
+    # v8.0b: H4 ADX Slope Filter
+    # Not just ADX level, but whether trend is strengthening or weakening
+    USE_ADX_SLOPE = False
+    ADX_SLOPE_LOOKBACK = 5           # H4 bars for ADX slope calc
+    ADX_FALLING_PENALTY = 2          # Raise min_score when ADX is falling (trend weakening)
 
-    # v8.0: ER Regime Detection (range-market filter)
-    REGIME_METHOD = 'er'             # 'none' or 'er'
-    REGIME_ER_PERIOD = 20            # Efficiency ratio lookback on H4
-    REGIME_ER_THRESHOLD = 0.3        # ER below this = choppy/ranging
-    REGIME_SCORE_BOOST = 3           # Extra MIN_SCORE in ranging regime
+    # v8.0c: Confirmation Escalation (adaptive entry based on recent performance)
+    USE_CONFIRMATION_ESCALATION = False
+    CONF_ESC_LOOKBACK = 20           # Number of recent trades to evaluate
+    CONF_ESC_WR_THRESHOLD = 0.40     # Win rate below this triggers escalation
+    CONF_ESC_SCORE_BOOST = 2         # Extra points required when losing
 
-    # v9.0: Regime-Adaptive Strategy Engine
-    USE_REGIME_ADAPTIVE = True
+    # v8.0d: H4+H1 Alignment Filter
+    # In weak-trend regime, require both H4 and H1 MA directions to agree
+    USE_TF_ALIGNMENT_FILTER = False
+    TF_ALIGNMENT_ADX_THRESHOLD = 25  # Apply alignment filter when ADX < this
 
-    # Regime classification thresholds (2D: ER x Volatility)
-    REGIME_ER_TREND = 0.3            # ER >= this = trending
-    REGIME_VOL_HIGH = 1.5            # vol_ratio >= this = high volatility
-    REGIME_VOL_CRASH = 3.0           # vol_ratio >= this = crash (no trading)
-    REGIME_VOL_RANGE_CAP = 1.2       # vol_ratio <= this for pure range
-    REGIME_SMOOTH_PERIOD = 5         # EMA smoothing for regime persistence (H4 bars)
+    # v8.0e: Range Compression Detector
+    # Detect narrow price ranges (consolidation) -> higher false breakout risk
+    USE_RANGE_COMPRESSION = False
+    RANGE_COMP_LOOKBACK = 20         # H1 bars for range measurement
+    RANGE_COMP_RATIO = 0.5           # If recent range < ratio * historical range, it's compressed
+    RANGE_COMP_HIST_LOOKBACK = 100   # Historical range lookback (H1 bars)
+    RANGE_COMP_SCORE_BOOST = 2       # Extra min_score during compression
 
-    # TREND regime profile (ER >= 0.3, vol < 1.5)
-    TREND_MIN_SCORE = 9              # v9.0b: raised from 8 (too many low-quality trades)
-    TREND_SL_ATR_MULTI = 1.5
-    TREND_TP_ATR_MULTI = 4.0        # Wider TP to ride trends
-    TREND_LOT_SCALE = 1.0
-    TREND_ALLOW_PYRAMID = True
-    TREND_SCORE_MARGIN = 2
-    TREND_COOLDOWN_BARS = 12         # Shorter cooldown in trending
-    TREND_SL_WIDEN = 1.3             # With-trend SL widen
-    TREND_TP_EXTEND = 1.3            # With-trend TP extend (was 1.2)
-    # Component bonuses: H4 Trend(+1), Momentum Burst(+1)
-    TREND_COMPONENT_BONUS = {0: 1, 13: 1}
+    # v8.0f: Seasonal/Quarterly Adaptation
+    # Tighten entry criteria during historically weak Q1/Q2 periods
+    USE_SEASONAL_ADAPT = False
+    SEASONAL_WEAK_MONTHS = {1, 2, 3, 4, 5, 6}  # Months with weaker performance
+    SEASONAL_SCORE_BOOST = 1         # Extra min_score during weak months
+    SEASONAL_TP_TIGHTEN = 0.85       # TP multiplier during weak months (tighter)
 
-    # RANGE regime profile (ER < 0.3, vol < 1.2)
-    RANGE_MIN_SCORE = 10
-    RANGE_SL_ATR_MULTI = 1.2        # Tighter SL
-    RANGE_TP_ATR_MULTI = 2.0        # Tight TP (mean reversion targets)
-    RANGE_LOT_SCALE = 0.7           # Smaller lots
-    RANGE_ALLOW_PYRAMID = False
-    RANGE_SCORE_MARGIN = 3           # Require clearer signals
-    RANGE_COOLDOWN_BARS = 20         # Longer cooldown in choppy
-    RANGE_SL_WIDEN = 1.0             # No trend alignment in range
-    RANGE_TP_EXTEND = 1.0
-    # Component bonuses: BB Bounce(+1), S/R(+1), RSI Divergence(+1), Channel(+1)
-    RANGE_COMPONENT_BONUS = {3: 1, 10: 1, 9: 1, 5: 1}
-    # Mean-reversion specific
-    RANGE_MR_ENABLED = False          # v9.0c: disabled (PF<1.0 in 2/3 periods). Use USE_MEAN_REVERSION instead
-    RANGE_MR_RSI_OB = 75             # RSI overbought for MR sell
-    RANGE_MR_RSI_OS = 25             # RSI oversold for MR buy
-    RANGE_MR_RSI_OB_MILD = 70
-    RANGE_MR_RSI_OS_MILD = 30
-    RANGE_MR_BB_PROXIMITY = 0.15     # BB position < this or > 1-this
-    RANGE_MR_SL_ATR = 1.0            # Tight SL for MR
-    RANGE_MR_TP_ATR = 1.8            # v9.0b: raised from 1.5 (too tight)
-    RANGE_MR_LOT_SCALE = 0.4         # v9.0b: reduced from 0.5 (limit MR risk)
-    RANGE_MR_MIN_SCORE = 3           # v9.0b: raised from 2 (filter weak MR signals)
+    # v8.0g: Losing Streak Cooldown
+    # After consecutive losses, pause longer before next entry
+    USE_LOSING_STREAK_COOLDOWN = False
+    STREAK_THRESHOLD = 3             # After N consecutive losses
+    STREAK_EXTRA_COOLDOWN = 16       # Extra M15 bars of cooldown
 
-    # HIGH_VOL regime profile (vol >= 1.5, not crash)
-    HIGHVOL_MIN_SCORE = 13
-    HIGHVOL_SL_ATR_MULTI = 2.0      # v9.0b: reduced from 2.5 (wide SL = big losses)
-    HIGHVOL_TP_ATR_MULTI = 3.5
-    HIGHVOL_LOT_SCALE = 0.3          # v9.0b: conservative lots
-    HIGHVOL_ALLOW_PYRAMID = False    # v9.0d: reverted (pyramid in high-vol causes DD blowup)
-    HIGHVOL_SCORE_MARGIN = 3
-    HIGHVOL_COOLDOWN_BARS = 24       # Longest cooldown
-    HIGHVOL_SL_WIDEN = 1.0           # No trend alignment
-    HIGHVOL_TP_EXTEND = 1.0
-    # Component bonuses: Momentum Burst(+2), Volume Climax(+1)
-    HIGHVOL_COMPONENT_BONUS = {13: 2, 14: 1}
+    # v9.0: Range Strategy v2 -- BB Mean Reversion + Stochastic
+    # Activates INSTEAD of trend-following when H4 ADX < threshold (ranging detected)
+    # Uses BB touch + RSI extreme + Stochastic cross + M15 confirmation
+    USE_RANGE_STRATEGY_V2 = False
+    RANGE_V2_ADX_THRESHOLD = 20     # H4 ADX below this = ranging
+    RANGE_V2_BB_PERIOD = 20
+    RANGE_V2_BB_DEV = 2.0
+    RANGE_V2_RSI_OS = 35            # oversold threshold
+    RANGE_V2_RSI_OB = 65            # overbought threshold
+    RANGE_V2_USE_STOCH = True
+    RANGE_V2_STOCH_PERIOD = 14
+    RANGE_V2_STOCH_SMOOTH = 3       # %K and %D smoothing
+    RANGE_V2_TP_MODE = 'bb_mid'     # TP at BB middle band
+    RANGE_V2_SL_ATR = 1.5           # SL = 1.5 * ATR beyond entry
+    RANGE_V2_TIME_EXIT_HOURS = 24   # Close after 24 hours if no TP/SL
+    RANGE_V2_PARTIAL_ATR = 0.5      # Partial close at 0.5 * ATR profit
+    RANGE_V2_PARTIAL_RATIO = 0.5    # Close 50% at partial target
+    RANGE_V2_RISK_MULTI = 0.6       # Position size multiplier for range trades
+    RANGE_V2_USE_KELTNER = False    # Alternative: Keltner Channel + RSI
+    RANGE_V2_KELTNER_PERIOD = 20
+    RANGE_V2_KELTNER_ATR_MULTI = 1.5
+    RANGE_V2_KELTNER_RSI_OS = 30
+    RANGE_V2_KELTNER_RSI_OB = 70
+    RANGE_V2_USE_M15_CONFIRM = True # Require M15 candle direction confirmation
+    RANGE_V2_TREND_FILTER = True    # Block counter-trend entries even in ranging
 
-    # v10.0: Intelligent Regime Engine
-    USE_V10_ENGINE = True
+    # v10.0: Realistic Execution Simulation
+    # Spread: use actual Spread column from CSV data instead of fixed MAX_SPREAD_POINTS
+    USE_REALISTIC_SPREAD = True       # Use per-bar Spread from CSV data
+    SLIPPAGE_POINTS = 3               # Additional slippage in points per trade
+    COMMISSION_PER_LOT = 7.0          # USD per round-trip lot (ECN Gold typical)
+    USE_INTRABAR_SLTP_ORDER = True    # Determine SL/TP hit order using OHLC proximity
 
-    # 1. Regime Transition Smoothing (blend parameters on regime change)
-    REGIME_BLEND_ALPHA = 0.3         # Blending speed: 0=never change, 1=instant switch
-    USE_REGIME_BLENDING = False       # v10.0a: disabled (averaging destroys edge)
-
-    # 2. Dynamic Component Effectiveness Tracking
-    USE_COMPONENT_EFFECTIVENESS = True
-    COMP_EFF_LOOKBACK = 100          # Rolling window for component accuracy
-    COMP_EFF_MIN_TRADES = 20         # Minimum trades before adjusting
-    COMP_EFF_BOOST = 0.3             # Extra weight when effectiveness > 1.3x baseline
-    COMP_EFF_PENALTY = 0.3           # Weight reduction when effectiveness < 0.7x baseline
-
-    # 3. Session-Regime Interaction
-    USE_SESSION_REGIME = True
-    # Session definitions (UTC hours)
-    SESSION_ASIAN_START = 0
-    SESSION_ASIAN_END = 8
-    SESSION_LONDON_START = 8
-    SESSION_LONDON_END = 16
-    SESSION_NY_START = 13
-    SESSION_NY_END = 22
-    # Session modifiers per regime (subtle adjustments, close to 1.0)
-    # Asian: gold tends to range → slight boost RANGE
-    SESSION_ASIAN_TREND_LOT = 0.9
-    SESSION_ASIAN_RANGE_LOT = 1.0
-    SESSION_ASIAN_HIGHVOL_LOT = 0.5
-    # London: best for trend-following → slight boost TREND
-    SESSION_LONDON_TREND_LOT = 1.1
-    SESSION_LONDON_RANGE_LOT = 0.9
-    SESSION_LONDON_HIGHVOL_LOT = 0.5
-    # NY: overlap session, good for breakouts
-    SESSION_NY_TREND_LOT = 1.0
-    SESSION_NY_RANGE_LOT = 1.0
-    SESSION_NY_HIGHVOL_LOT = 0.4
-
-    # 4. Adaptive Exit per Regime
-    USE_ADAPTIVE_EXIT = True
-    # TREND: let winners run (slightly wider than default)
-    TREND_PARTIAL_TP_RATIO = 0.55    # Slightly delay partial close (vs default 0.5)
-    TREND_BE_ATR_MULTI = 1.6         # Slightly higher BE threshold (vs 1.5)
-    TREND_TRAIL_ATR_MULTI = 1.1      # Slightly wider trailing (vs 1.0)
-    TREND_RATCHET_STEP = 0.55        # Slightly slower ratchet (vs 0.5)
-    # RANGE: quick profits (slightly tighter than default)
-    RANGE_PARTIAL_TP_RATIO = 0.4     # Earlier partial close
-    RANGE_BE_ATR_MULTI = 1.2         # Quicker breakeven
-    RANGE_TRAIL_ATR_MULTI = 0.8      # Tighter trailing
-    RANGE_RATCHET_STEP = 0.4         # Faster ratchet
-    # HIGH_VOL: protect capital (tighter)
-    HIGHVOL_PARTIAL_TP_RATIO = 0.5   # Same as default (no early exit penalty)
-    HIGHVOL_BE_ATR_MULTI = 1.5       # Same as default (avoid premature BE)
-    HIGHVOL_TRAIL_ATR_MULTI = 1.0    # Same as default (wider trailing)
-    HIGHVOL_RATCHET_STEP = 0.5       # Same as default (slower ratchet)
-
-    # 5. Regime Performance Memory (v10.0a: disabled, worsens DD +5%)
-    USE_REGIME_MEMORY = False
-    REGIME_MEMORY_LOOKBACK = 25      # Track last 25 trades per regime
-    REGIME_POOR_PF = 0.9             # PF below this → +2 MIN_SCORE
-    REGIME_GOOD_PF = 1.5             # PF above this → -1 MIN_SCORE
-
-    # v8.2: Graduated SL expansion (tested, rejected: DD +4.5%)
-    GRADUATED_SL = False             # Disabled: wider SL increases loss per trade
-    GRADUATED_SL_START = 0.8
-    GRADUATED_SL_SCALE = 0.7
-    GRADUATED_SL_CAP = 0.5
-
-    # v8.2: Consecutive loss cooldown escalation (tested, rejected: PF 1.07)
-    CONSEC_LOSS_ESCALATION = False   # Disabled: halves trades, destroys performance
-    CONSEC_LOSS_THRESHOLD = 3
-    CONSEC_LOSS_COOLDOWN_MULTI = 2.0
-    CONSEC_LOSS_MAX_MULTI = 4.0
-
-    # v11.0: Range Market Improvements
-    USE_V11_RANGE = True
-
-    # 1. Macro-Range ER: longer lookback (60 H4 bars ≈ 10 trading days)
-    #    Even when short-term ER says "trend", if macro ER is low → apply range guard
-    V11_MACRO_ER_PERIOD = 60
-    V11_MACRO_ER_THRESHOLD = 0.20    # Strict: only deep structural ranges
-
-    # 2. Trend-component dampening in range/macro-range:
-    #    Momentum Burst (3pt→1pt), H4 Trend (3pt→1pt) when macro ER < threshold
-    V11_BURST_CAP_IN_RANGE = 1       # Cap Momentum Burst points in range context
-    V11_H4TREND_CAP_IN_RANGE = 1     # Cap H4 Trend points in range context
-
-    # 3. High-score ceiling: cap max effective score (prevents score inversion)
-    V11_RANGE_MAX_SCORE = 15          # Score ceiling in range context
-
-    # 4. Macro-range TP tightening: even "trend" regime uses tighter TP
-    V11_MACRO_RANGE_TP_MULTI = 2.5    # TP multiplier when macro ER is low (vs 4.0)
-    V11_MACRO_RANGE_PYRAMID = False   # Block pyramids in macro-range
-
-    # v13.0: Component Correlation Cap
-    USE_CORRELATION_CAP = True
-    # Groups of correlated components: if multiple fire same direction, only strongest gets full score
-    # Key = group name, Value = list of component indices
-    CORRELATED_GROUPS = {
-        'trend_alignment': [0, 13],    # H4 Trend(3pt) + Momentum Burst(3pt) share H4 MA
-        'rsi_family': [2, 12],         # H1 RSI(1pt) + H4 RSI Alignment(1pt)
-        'ma_family': [1, 4],           # H1 MA(2pt) + M15 MA Cross(2pt)
-    }
-    CORRELATION_CAP_RATIO = 0.5  # Secondary components get 50% of their points
-
-    # v8.1: Mean-Reversion Layer (range-market counter-trend entries)
-    USE_MEAN_REVERSION = True
-    MR_ADX_THRESHOLD = 30
-    MR_ATR_RATIO_MAX = 1.3
-    MR_RSI_OVERBOUGHT = 75
-    MR_RSI_OVERSOLD = 25
-    MR_RSI_OB_MILD = 70
-    MR_RSI_OS_MILD = 30
-    MR_RSI_POINTS = 2
-    MR_RSI_MILD_POINTS = 1
-    MR_BB_POINTS = 2
-    MR_COMBO_BONUS = 1
-    MR_SL_ATR_MULTI = 1.2
-    MR_TP_ATR_MULTI = 2.0
-    MR_LOT_SCALE = 0.7
-    MR_MIN_SCORE = 2
-
-    # v13.0: Realtime Volatility Spike Detection
-    USE_REALTIME_SPIKE = True
-    SPIKE_ATR_MULTI = 2.5        # Single bar range > ATR × 2.5 = spike
-    SPIKE_COOLDOWN_BARS = 8      # 8 M15 bars (2 hours) cooldown after spike
-    SPIKE_CLOSE_LOSING = True    # Close losing positions on spike detection
-
-    # v13.0: Multi-scale Regime Detection
-    USE_MULTISCALE_REGIME = True
-    REGIME_ER_FAST = 8          # H4 8 bars (~32 hours) - short-term directionality
-    REGIME_ER_MED = 20          # H4 20 bars (~80 hours) - medium-term trend (existing)
-    REGIME_ER_SLOW = 40         # H4 40 bars (~160 hours) - structural range (reduced from 60)
-    REGIME_STABILITY_BARS = 3   # Require 3 consecutive bars same regime for confirmed
-    REGIME_TRANSITION_PENALTY = 0.7  # Lot scale during regime transition
-
-    # v13.0: Trade Quality (MAE/MFE) Tracking
-    USE_TRADE_QUALITY = True
-    TQ_LOOKBACK = 50            # Track last 50 trades
-    TQ_MIN_TRADES = 15          # Minimum trades before filtering
-    TQ_MAE_THRESHOLD = 0.7      # MAE > 70% of SL = bad entry
-    TQ_BAD_ENTRY_LIMIT = 0.5    # If >50% bad entries, raise MIN_SCORE
-    TQ_SCORE_PENALTY = 1        # MIN_SCORE += 1 when entry quality is poor
-
-
-# Component base point values (for correlation cap calculation)
-COMPONENT_BASE_POINTS = {0: 3, 1: 2, 2: 1, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 2, 9: 2, 10: 1, 11: 1, 12: 1, 13: 3, 14: 2}
 
 # ============================================================
 # Indicators
@@ -410,39 +298,128 @@ def calc_ema(s, p):
     return s.ewm(span=p, adjust=False).mean()
 
 def calc_rsi(series, period):
+    """RSI using Wilder's Smoothing (RMA) to match MT5 iRSI()."""
     delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = delta.where(delta > 0, 0).ewm(alpha=1.0/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1.0/period, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
     return 100 - (100 / (1 + rs))
 
+def _wilder_smooth(series, period):
+    """Wilder's smoothing matching MT5 exactly.
+
+    Initialization: SMA of first `period` valid values.
+    Then: result[i] = result[i-1] * (period-1)/period + value[i] / period
+    """
+    values = series.values.astype(float)
+    result = np.full_like(values, np.nan)
+    alpha = 1.0 / period
+
+    # Find first valid window of `period` consecutive non-NaN values
+    count = 0
+    start = -1
+    for i in range(len(values)):
+        if np.isnan(values[i]):
+            count = 0
+        else:
+            count += 1
+            if count == period:
+                start = i - period + 1
+                break
+
+    if start < 0:
+        return pd.Series(result, index=series.index)
+
+    # Initialize with SMA of first `period` values (matches MT5)
+    result[start + period - 1] = np.mean(values[start:start + period])
+
+    # Wilder's smoothing from there
+    for i in range(start + period, len(values)):
+        if np.isnan(values[i]):
+            result[i] = result[i - 1]
+        else:
+            result[i] = result[i - 1] * (1 - alpha) + values[i] * alpha
+
+    return pd.Series(result, index=series.index)
+
+
 def calc_atr(high, low, close, period=14):
+    """ATR using Simple Moving Average to match MT5 iATR().
+
+    MT5's iATR() returns SMA of True Range, NOT Wilder's smoothing.
+    Verified empirically: SMA matches MT5 output with zero error.
+    """
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+    return tr.rolling(window=period, min_periods=period).mean()
+
 
 def calc_adx(high, low, close, period=14):
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    """ADX using Wilder's exact step-by-step algorithm to match MT5 iADX().
+
+    Wilder's ADX algorithm:
+    1. Compute TR, +DM, -DM per bar
+    2. Smooth TR/+DM/-DM with Wilder's method (SMA init, then RMA)
+    3. +DI = 100 * Smoothed(+DM) / Smoothed(TR)
+    4. -DI = 100 * Smoothed(-DM) / Smoothed(TR)
+    5. DX  = 100 * |+DI - -DI| / (+DI + -DI)
+    6. ADX = Wilder's smoothing of DX (SMA of first `period` DX values, then RMA)
+    """
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0)
+    minus_dm = down.where((down > up) & (down > 0), 0)
+
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr.replace(0, 1e-10))
-    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr.replace(0, 1e-10))
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)
-    adx = dx.rolling(window=period).mean()
+
+    # Wilder-smooth TR, +DM, -DM independently
+    sm_tr = _wilder_smooth(tr, period)
+    sm_plus = _wilder_smooth(plus_dm, period)
+    sm_minus = _wilder_smooth(minus_dm, period)
+
+    plus_di = 100 * (sm_plus / sm_tr.replace(0, np.nan))
+    minus_di = 100 * (sm_minus / sm_tr.replace(0, np.nan))
+
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+
+    # ADX = Wilder's smoothing of DX
+    adx = _wilder_smooth(dx, period)
+
     return adx, plus_di, minus_di
 
 def calc_bb(series, period, deviation):
     sma = series.rolling(window=period).mean()
-    std = series.rolling(window=period).std()
+    std = series.rolling(window=period).std(ddof=0)  # MT5 uses population std
     return sma + deviation * std, sma, sma - deviation * std
+
+def calc_stochastic(high, low, close, k_period=14, k_smooth=3, d_smooth=3):
+    """Calculate Stochastic Oscillator %K and %D.
+
+    %K = SMA(k_smooth) of raw %K
+    %D = SMA(d_smooth) of %K
+    """
+    lowest_low = low.rolling(window=k_period, min_periods=k_period).min()
+    highest_high = high.rolling(window=k_period, min_periods=k_period).max()
+    raw_k = 100 * (close - lowest_low) / (highest_high - lowest_low).replace(0, 1e-10)
+    k = raw_k.rolling(window=k_smooth, min_periods=k_smooth).mean()
+    d = k.rolling(window=d_smooth, min_periods=d_smooth).mean()
+    return k, d
+
+def calc_keltner(close, high, low, ema_period=20, atr_multi=1.5, atr_period=14):
+    """Calculate Keltner Channel: EMA ± ATR multiplier.
+
+    Returns: (upper, middle, lower)
+    """
+    middle = calc_ema(close, ema_period)
+    atr = calc_atr(high, low, close, atr_period)
+    upper = middle + atr_multi * atr
+    lower = middle - atr_multi * atr
+    return upper, middle, lower
 
 def calc_channel_signal(close_series, lookback=40):
     if len(close_series) < lookback:
@@ -680,17 +657,16 @@ def get_candle_pattern(h1_df, current_time):
     return 0
 
 
-
 def get_h4_rsi_alignment(h4_rsi_val, h1_rsi_val):
-    """Check H4 RSI alignment with H1 RSI (symmetric for bull/bear)."""
+    """Check H4 RSI alignment with H1 RSI."""
     if pd.isna(h4_rsi_val) or pd.isna(h1_rsi_val):
         return 0
 
-    # Bullish alignment: H4 RSI 50-75 + H1 RSI not overbought (< 75)
-    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 75:
+    # H4 RSI 50-75 + H1 RSI < 70 -> bullish alignment
+    if 50 <= h4_rsi_val <= 75 and h1_rsi_val < 70:
         return 1
-    # Bearish alignment: H4 RSI 25-50 + H1 RSI not oversold (> 25)
-    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 25:
+    # H4 RSI 25-50 + H1 RSI > 30 -> bearish alignment
+    if 25 <= h4_rsi_val <= 50 and h1_rsi_val > 30:
         return -1
     return 0
 
@@ -804,7 +780,6 @@ class GoldBacktester:
         self.open_positions = []
         self.peak_balance = cfg.INITIAL_BALANCE
         self.cooldown_until = 0
-        self.consecutive_sl_count = 0     # v8.2: track consecutive SL losses
         # v3.0 additions
         self.recent_trade_pnls = []
         self.component_stats = {i: {"wins": 0, "total": 0} for i in range(15)}  # v4.0: 15 components
@@ -816,34 +791,62 @@ class GoldBacktester:
         self.crash_skips = 0
         self.weekend_closes = 0
         self.spread_blocks = 0
-        # v9.0: Regime tracking
-        self.regime_stats = {'trend': 0, 'range': 0, 'high_vol': 0, 'crash': 0}
-        self.regime_trades = {'trend': [], 'range': [], 'high_vol': []}
-        self.mr_trades = 0  # Mean-reversion entries
-        self.spike_blocks = 0          # v13.0: spike detection blocks
-        self.spike_cooldown_until = 0  # v13.0: bar index for spike cooldown
-        # v13.0: Regime stability tracking
-        self.regime_stable_count = 0
-        self.regime_confirmed = True
-        self.regime_transition_bar = 0
-        self.regime_transition_mult = 1.0
-        self.last_stable_regime = 'trend'
-        self.current_regime = 'trend'  # Default
+        # v7.0: Range-reversion tracking
+        self.range_trades = 0
+        self.range_wins = 0
+        # v8.0g: Losing streak tracking
+        self.consecutive_losses = 0
 
-        # v13.0: Trade quality tracking (MAE/MFE)
-        self.tq_mae_ratios = []  # MAE / SL_distance for each closed trade
-        self.tq_mfe_ratios = []  # MFE / TP_distance for each closed trade
+    # ---- v7.0 Range-Reversion Method ----
 
-        # v10.0: Intelligent Regime Engine state
-        # 1. Regime blending weights (sum to 1.0)
-        self.regime_weights = {'trend': 1.0, 'range': 0.0, 'high_vol': 0.0}
-        # 2. Component effectiveness tracking (rolling PnL per component per direction)
-        self.component_trades = {i: [] for i in range(15)}  # list of (direction_match, pnl_jpy)
-        # 3. Session tracking (for reporting)
-        self.session_stats = {'asian': 0, 'london': 0, 'ny': 0}
-        # 4. Adaptive exit: regime stored per position in pos dict
-        # 5. Regime performance memory
-        self.regime_trade_pnls = {'trend': [], 'range': [], 'high_vol': []}
+    def get_range_signal(self, h1_curr_close, h1_prev_close, h1_curr_rsi,
+                         h1_curr_bb_upper, h1_curr_bb_lower, sr_signal, cfg):
+        """Mean-reversion signal for ranging markets.
+
+        Uses BB bounce, RSI extremes, and S/R proximity.
+        Returns: (direction, confirmations) where direction is 'BUY'/'SELL'/None
+        """
+        if not getattr(cfg, 'USE_RANGE_REVERSION', False):
+            return None, 0
+
+        buy_confirms = 0
+        sell_confirms = 0
+
+        # 1. Bollinger Band bounce
+        if getattr(cfg, 'RANGE_BB_ENABLED', True):
+            if not (np.isnan(h1_curr_bb_upper) or np.isnan(h1_curr_bb_lower)):
+                bw = h1_curr_bb_upper - h1_curr_bb_lower
+                if bw > 0:
+                    bp = (h1_curr_close - h1_curr_bb_lower) / bw
+                    # Price near lower band AND turning up -> BUY
+                    if bp < 0.15 and h1_curr_close > h1_prev_close:
+                        buy_confirms += 1
+                    # Price near upper band AND turning down -> SELL
+                    elif bp > 0.85 and h1_curr_close < h1_prev_close:
+                        sell_confirms += 1
+
+        # 2. RSI oversold/overbought reversal
+        rsi_os = getattr(cfg, 'RANGE_RSI_OVERSOLD', 30)
+        rsi_ob = getattr(cfg, 'RANGE_RSI_OVERBOUGHT', 70)
+        if not np.isnan(h1_curr_rsi):
+            if h1_curr_rsi < rsi_os:
+                buy_confirms += 1
+            elif h1_curr_rsi > rsi_ob:
+                sell_confirms += 1
+
+        # 3. S/R proximity (already computed: +1=near support, -1=near resistance)
+        if sr_signal == 1:
+            buy_confirms += 1
+        elif sr_signal == -1:
+            sell_confirms += 1
+
+        min_conf = getattr(cfg, 'RANGE_MIN_CONFIRMATIONS', 2)
+
+        if buy_confirms >= min_conf and buy_confirms > sell_confirms:
+            return 'BUY', buy_confirms
+        elif sell_confirms >= min_conf and sell_confirms > buy_confirms:
+            return 'SELL', sell_confirms
+        return None, 0
 
     # ---- v4.0 Defense Methods ----
 
@@ -908,493 +911,6 @@ class GoldBacktester:
         max_loss = self.balance * self.cfg.DAILY_MAX_LOSS_PCT / 100.0
         return self.daily_pnl <= -max_loss
 
-    def detect_realtime_spike(self, m15_df, i, current_atr):
-        """Detect M15-level volatility spikes for flash crash protection."""
-        if not self.cfg.USE_REALTIME_SPIKE or current_atr <= 0:
-            return False
-        bar_range = m15_df["High"].iloc[i] - m15_df["Low"].iloc[i]
-        if bar_range > current_atr * self.cfg.SPIKE_ATR_MULTI:
-            return True
-        # 2-bar combined range check (catches gap moves)
-        if i >= 1:
-            two_bar_high = max(m15_df["High"].iloc[i], m15_df["High"].iloc[i - 1])
-            two_bar_low = min(m15_df["Low"].iloc[i], m15_df["Low"].iloc[i - 1])
-            two_bar_range = two_bar_high - two_bar_low
-            if two_bar_range > current_atr * self.cfg.SPIKE_ATR_MULTI * 1.5:
-                return True
-        return False
-
-    # ---- v9.0 Regime-Adaptive Methods ----
-
-    def detect_regime_v9(self, h4_er, vol_ratio):
-        """
-        2D regime classification: ER (trend quality) x Volatility (ATR ratio).
-        Returns: 'crash', 'high_vol', 'trend', 'range'
-        """
-        cfg = self.cfg
-        if vol_ratio >= cfg.REGIME_VOL_CRASH:
-            return 'crash'
-        if vol_ratio >= cfg.REGIME_VOL_HIGH:
-            return 'high_vol'
-        if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_TREND:
-            if vol_ratio <= cfg.REGIME_VOL_RANGE_CAP:
-                return 'range'
-            else:
-                return 'high_vol'  # Mid-vol + low ER = treat as high vol
-        return 'trend'
-
-    def detect_regime_v13(self, fast_er, med_er, slow_er, vol_ratio):
-        """Multi-scale 3-layer ER regime classification (v13.0).
-        Uses fast/med/slow ER for more nuanced regime detection.
-        Returns: 'crash', 'high_vol_trend', 'high_vol_range', 'trend_strong',
-                 'trend_weak', 'range'
-        """
-        cfg = self.cfg
-        if vol_ratio >= cfg.REGIME_VOL_CRASH:
-            return 'crash'
-
-        is_trending_fast = pd.notna(fast_er) and fast_er >= 0.3
-        is_trending_med = pd.notna(med_er) and med_er >= 0.3
-        is_structural_range = pd.notna(slow_er) and slow_er < 0.25
-        is_high_vol = vol_ratio >= cfg.REGIME_VOL_HIGH
-        is_mid_vol = vol_ratio >= cfg.REGIME_VOL_RANGE_CAP
-
-        if is_high_vol:
-            if is_trending_fast:
-                return 'high_vol_trend'
-            else:
-                return 'high_vol_range'
-
-        if is_trending_fast and is_trending_med:
-            return 'trend_strong'
-
-        if is_trending_fast and not is_trending_med:
-            return 'trend_weak'
-
-        return 'range'
-
-    def update_regime_stability(self, new_regime, bar_idx):
-        """Track regime stability for transition penalty."""
-        cfg = self.cfg
-        if not cfg.USE_MULTISCALE_REGIME:
-            return
-
-        # Map v13 regimes to base regimes for stability check
-        base_regime_map = {
-            'trend_strong': 'trend', 'trend_weak': 'trend',
-            'high_vol_trend': 'high_vol', 'high_vol_range': 'high_vol',
-            'range': 'range', 'crash': 'crash',
-        }
-        base = base_regime_map.get(new_regime, 'trend')
-        last_base = base_regime_map.get(self.last_stable_regime, 'trend')
-
-        if base == last_base:
-            self.regime_stable_count += 1
-        else:
-            self.regime_stable_count = 1
-            self.regime_transition_bar = bar_idx
-
-        self.last_stable_regime = new_regime
-        self.regime_confirmed = self.regime_stable_count >= cfg.REGIME_STABILITY_BARS
-
-        bars_since = bar_idx - self.regime_transition_bar
-        if bars_since < 12:
-            self.regime_transition_mult = cfg.REGIME_TRANSITION_PENALTY
-        else:
-            self.regime_transition_mult = 1.0
-
-
-    def get_regime_profile(self, regime):
-        """Return regime-specific trading parameters."""
-        cfg = self.cfg
-        if regime == 'trend':
-            return {
-                'min_score': cfg.TREND_MIN_SCORE,
-                'sl_multi': cfg.TREND_SL_ATR_MULTI,
-                'tp_multi': cfg.TREND_TP_ATR_MULTI,
-                'lot_scale': cfg.TREND_LOT_SCALE,
-                'allow_pyramid': cfg.TREND_ALLOW_PYRAMID,
-                'score_margin': cfg.TREND_SCORE_MARGIN,
-                'cooldown_bars': cfg.TREND_COOLDOWN_BARS,
-                'sl_widen': cfg.TREND_SL_WIDEN,
-                'tp_extend': cfg.TREND_TP_EXTEND,
-                'component_bonus': cfg.TREND_COMPONENT_BONUS,
-            }
-        elif regime == 'range':
-            return {
-                'min_score': cfg.RANGE_MIN_SCORE,
-                'sl_multi': cfg.RANGE_SL_ATR_MULTI,
-                'tp_multi': cfg.RANGE_TP_ATR_MULTI,
-                'lot_scale': cfg.RANGE_LOT_SCALE,
-                'allow_pyramid': cfg.RANGE_ALLOW_PYRAMID,
-                'score_margin': cfg.RANGE_SCORE_MARGIN,
-                'cooldown_bars': cfg.RANGE_COOLDOWN_BARS,
-                'sl_widen': cfg.RANGE_SL_WIDEN,
-                'tp_extend': cfg.RANGE_TP_EXTEND,
-                'component_bonus': cfg.RANGE_COMPONENT_BONUS,
-            }
-        elif regime == 'high_vol':
-            return {
-                'min_score': cfg.HIGHVOL_MIN_SCORE,
-                'sl_multi': cfg.HIGHVOL_SL_ATR_MULTI,
-                'tp_multi': cfg.HIGHVOL_TP_ATR_MULTI,
-                'lot_scale': cfg.HIGHVOL_LOT_SCALE,
-                'allow_pyramid': cfg.HIGHVOL_ALLOW_PYRAMID,
-                'score_margin': cfg.HIGHVOL_SCORE_MARGIN,
-                'cooldown_bars': cfg.HIGHVOL_COOLDOWN_BARS,
-                'sl_widen': cfg.HIGHVOL_SL_WIDEN,
-                'tp_extend': cfg.HIGHVOL_TP_EXTEND,
-                'component_bonus': cfg.HIGHVOL_COMPONENT_BONUS,
-            }
-        elif regime == 'trend_strong':
-            # v13.0: Same as trend (both fast and med ER confirm)
-            return {
-                'min_score': cfg.TREND_MIN_SCORE,
-                'sl_multi': cfg.TREND_SL_ATR_MULTI,
-                'tp_multi': cfg.TREND_TP_ATR_MULTI,
-                'lot_scale': cfg.TREND_LOT_SCALE,
-                'allow_pyramid': cfg.TREND_ALLOW_PYRAMID,
-                'score_margin': cfg.TREND_SCORE_MARGIN,
-                'cooldown_bars': cfg.TREND_COOLDOWN_BARS,
-                'sl_widen': cfg.TREND_SL_WIDEN,
-                'tp_extend': cfg.TREND_TP_EXTEND,
-                'component_bonus': cfg.TREND_COMPONENT_BONUS,
-            }
-        elif regime == 'trend_weak':
-            # v13.0: Only fast ER trending, med ER not confirmed
-            return {
-                'min_score': 10,
-                'sl_multi': 1.3,
-                'tp_multi': 2.5,
-                'lot_scale': 0.8,
-                'allow_pyramid': False,
-                'score_margin': cfg.TREND_SCORE_MARGIN,
-                'cooldown_bars': 16,
-                'sl_widen': 1.1,
-                'tp_extend': 1.0,
-                'component_bonus': {},
-            }
-        elif regime == 'high_vol_trend':
-            # v13.0: High vol but with directional momentum
-            return {
-                'min_score': cfg.HIGHVOL_MIN_SCORE,
-                'sl_multi': cfg.HIGHVOL_SL_ATR_MULTI,
-                'tp_multi': cfg.HIGHVOL_TP_ATR_MULTI,
-                'lot_scale': 0.4,
-                'allow_pyramid': False,
-                'score_margin': cfg.HIGHVOL_SCORE_MARGIN,
-                'cooldown_bars': cfg.HIGHVOL_COOLDOWN_BARS,
-                'sl_widen': 1.0,
-                'tp_extend': 1.0,
-                'component_bonus': cfg.HIGHVOL_COMPONENT_BONUS,
-            }
-        elif regime == 'high_vol_range':
-            # v13.0: High vol without direction - most conservative
-            return {
-                'min_score': 14,
-                'sl_multi': 1.5,
-                'tp_multi': 2.0,
-                'lot_scale': 0.25,
-                'allow_pyramid': False,
-                'score_margin': 3,
-                'cooldown_bars': 24,
-                'sl_widen': 1.0,
-                'tp_extend': 1.0,
-                'component_bonus': {},
-            }
-        else:  # crash - should not trade
-            return None
-
-    def check_mean_reversion_entry(self, h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct):
-        """
-        v9.0: Mean-reversion entry for RANGE regime.
-        Uses RSI extremes + BB proximity + S/R levels.
-        Returns: (direction, mr_score) or (None, 0)
-        """
-        cfg = self.cfg
-        if not cfg.RANGE_MR_ENABLED:
-            return None, 0
-
-        rsi = h1_curr.get("rsi")
-        if not pd.notna(rsi):
-            return None, 0
-
-        bb_upper = h1_curr.get("bb_upper")
-        bb_lower = h1_curr.get("bb_lower")
-        if not (pd.notna(bb_upper) and pd.notna(bb_lower)):
-            return None, 0
-
-        bw = bb_upper - bb_lower
-        if bw <= 0:
-            return None, 0
-
-        bp = (cc - bb_lower) / bw  # BB position 0-1
-
-        mr_buy_score = 0
-        mr_sell_score = 0
-
-        # RSI extreme
-        if rsi <= cfg.RANGE_MR_RSI_OS:
-            mr_buy_score += 2
-        elif rsi <= cfg.RANGE_MR_RSI_OS_MILD:
-            mr_buy_score += 1
-
-        if rsi >= cfg.RANGE_MR_RSI_OB:
-            mr_sell_score += 2
-        elif rsi >= cfg.RANGE_MR_RSI_OB_MILD:
-            mr_sell_score += 1
-
-        # BB proximity
-        if bp < cfg.RANGE_MR_BB_PROXIMITY:
-            mr_buy_score += 2
-        elif bp < 0.25:
-            mr_buy_score += 1
-
-        if bp > (1 - cfg.RANGE_MR_BB_PROXIMITY):
-            mr_sell_score += 2
-        elif bp > 0.75:
-            mr_sell_score += 1
-
-        # S/R proximity
-        if cfg.USE_SR_LEVELS:
-            sr = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
-            if sr == 1:  # Near support
-                mr_buy_score += 1
-            elif sr == -1:  # Near resistance
-                mr_sell_score += 1
-
-        # Price rejection (candle direction vs BB position)
-        if bp < 0.3 and h1_curr["Close"] > h1_prev["Close"]:
-            mr_buy_score += 1  # Bouncing off lower BB
-        if bp > 0.7 and h1_curr["Close"] < h1_prev["Close"]:
-            mr_sell_score += 1  # Rejecting upper BB
-
-        # RSI divergence in MR context
-        if cfg.USE_DIVERGENCE:
-            h1_closes_series = h1_df[h1_mask]["Close"]
-            h1_rsi_series = h1_df[h1_mask]["rsi"]
-            div = get_divergence(h1_closes_series, h1_rsi_series,
-                                 cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
-            if div == 1:
-                mr_buy_score += 1
-            elif div == -1:
-                mr_sell_score += 1
-
-        # Entry decision
-        if mr_buy_score >= cfg.RANGE_MR_MIN_SCORE and mr_buy_score > mr_sell_score:
-            return "BUY", mr_buy_score
-        elif mr_sell_score >= cfg.RANGE_MR_MIN_SCORE and mr_sell_score > mr_buy_score:
-            return "SELL", mr_sell_score
-
-        return None, 0
-
-    # ---- v10.0 Intelligent Regime Methods ----
-
-    def update_regime_blend(self, current_regime):
-        """v10.0: Smooth regime transitions by blending weights."""
-        if not self.cfg.USE_REGIME_BLENDING or not self.cfg.USE_V10_ENGINE:
-            # Hard switch
-            self.regime_weights = {k: (1.0 if k == current_regime else 0.0)
-                                    for k in self.regime_weights}
-            return
-        alpha = self.cfg.REGIME_BLEND_ALPHA
-        for regime in self.regime_weights:
-            if regime == current_regime:
-                self.regime_weights[regime] = self.regime_weights[regime] * (1 - alpha) + alpha
-            else:
-                self.regime_weights[regime] = self.regime_weights[regime] * (1 - alpha)
-        # Normalize
-        total = sum(self.regime_weights.values())
-        if total > 0:
-            for k in self.regime_weights:
-                self.regime_weights[k] /= total
-
-    def get_blended_profile(self, current_regime):
-        """v10.0: Return blended profile from regime weights."""
-        if not self.cfg.USE_REGIME_BLENDING or not self.cfg.USE_V10_ENGINE:
-            return self.get_regime_profile(current_regime)
-
-        profiles = {}
-        for regime in ['trend', 'range', 'high_vol']:
-            p = self.get_regime_profile(regime)
-            if p:
-                profiles[regime] = p
-
-        # Blend numeric parameters by weight
-        blended = {}
-        numeric_keys = ['min_score', 'sl_multi', 'tp_multi', 'lot_scale',
-                        'score_margin', 'cooldown_bars', 'sl_widen', 'tp_extend']
-        for key in numeric_keys:
-            val = 0.0
-            for regime, weight in self.regime_weights.items():
-                if regime in profiles:
-                    val += profiles[regime][key] * weight
-            blended[key] = val
-
-        # Round min_score up to int
-        blended['min_score'] = int(np.ceil(blended['min_score']))
-        blended['cooldown_bars'] = int(round(blended['cooldown_bars']))
-
-        # Boolean: use dominant regime
-        dominant = max(self.regime_weights, key=self.regime_weights.get)
-        blended['allow_pyramid'] = profiles.get(dominant, {}).get('allow_pyramid', False)
-
-        # Component bonus: use dominant regime's bonuses
-        blended['component_bonus'] = profiles.get(dominant, {}).get('component_bonus', {})
-
-        return blended
-
-    def get_component_effectiveness(self, comp_idx):
-        """v10.0: Get effectiveness multiplier for a scoring component."""
-        if not self.cfg.USE_COMPONENT_EFFECTIVENESS or not self.cfg.USE_V10_ENGINE:
-            return 1.0
-
-        trades = self.component_trades[comp_idx]
-        if len(trades) < self.cfg.COMP_EFF_MIN_TRADES:
-            return 1.0
-
-        recent = trades[-self.cfg.COMP_EFF_LOOKBACK:]
-        wins = sum(1 for _, pnl in recent if pnl > 0)
-        total = len(recent)
-        if total == 0:
-            return 1.0
-
-        comp_wr = wins / total
-        # Baseline win rate from recent trades
-        baseline_wr = 0.5  # Use 50% as neutral baseline
-
-        effectiveness = comp_wr / baseline_wr if baseline_wr > 0 else 1.0
-
-        if effectiveness > 1.3:
-            return 1.0 + self.cfg.COMP_EFF_BOOST
-        elif effectiveness < 0.7:
-            return max(0.5, 1.0 - self.cfg.COMP_EFF_PENALTY)
-        return 1.0
-
-    def get_session(self, hour):
-        """v10.0: Get current trading session. London=8-13, NY=13-22 (overlap is NY)."""
-        cfg = self.cfg
-        if cfg.SESSION_ASIAN_START <= hour < cfg.SESSION_ASIAN_END:
-            return 'asian'
-        elif cfg.SESSION_LONDON_START <= hour < cfg.SESSION_NY_START:
-            return 'london'  # 8-13 UTC (pure London, no overlap)
-        else:
-            return 'ny'  # 13-22 UTC (includes London/NY overlap)
-
-    def get_session_lot_modifier(self, session, regime):
-        """v10.0: Get session-specific lot modifier for current regime."""
-        if not self.cfg.USE_SESSION_REGIME or not self.cfg.USE_V10_ENGINE:
-            return 1.0
-        cfg = self.cfg
-        modifiers = {
-            ('asian', 'trend'): cfg.SESSION_ASIAN_TREND_LOT,
-            ('asian', 'range'): cfg.SESSION_ASIAN_RANGE_LOT,
-            ('asian', 'high_vol'): cfg.SESSION_ASIAN_HIGHVOL_LOT,
-            ('london', 'trend'): cfg.SESSION_LONDON_TREND_LOT,
-            ('london', 'range'): cfg.SESSION_LONDON_RANGE_LOT,
-            ('london', 'high_vol'): cfg.SESSION_LONDON_HIGHVOL_LOT,
-            ('ny', 'trend'): cfg.SESSION_NY_TREND_LOT,
-            ('ny', 'range'): cfg.SESSION_NY_RANGE_LOT,
-            ('ny', 'high_vol'): cfg.SESSION_NY_HIGHVOL_LOT,
-        }
-        return modifiers.get((session, regime), 1.0)
-
-    def apply_correlation_cap(self, buy_score, sell_score, component_mask):
-        """Reduce double-counting from correlated components."""
-        if not self.cfg.USE_CORRELATION_CAP:
-            return buy_score, sell_score
-
-        for group_name, indices in self.cfg.CORRELATED_GROUPS.items():
-            # Find components in this group that fired in buy direction
-            buy_group = [i for i in indices if component_mask[i] == 1]
-            sell_group = [i for i in indices if component_mask[i] == -1]
-
-            if len(buy_group) > 1:
-                # Keep strongest at full, reduce others by cap ratio
-                max_pts_idx = max(buy_group, key=lambda i: COMPONENT_BASE_POINTS.get(i, 1))
-                for idx in buy_group:
-                    if idx != max_pts_idx:
-                        reduction = int(COMPONENT_BASE_POINTS.get(idx, 1) * self.cfg.CORRELATION_CAP_RATIO)
-                        buy_score -= reduction
-
-            if len(sell_group) > 1:
-                max_pts_idx = max(sell_group, key=lambda i: COMPONENT_BASE_POINTS.get(i, 1))
-                for idx in sell_group:
-                    if idx != max_pts_idx:
-                        reduction = int(COMPONENT_BASE_POINTS.get(idx, 1) * self.cfg.CORRELATION_CAP_RATIO)
-                        sell_score -= reduction
-
-        return max(0, buy_score), max(0, sell_score)
-
-    def get_entry_quality_penalty(self):
-        """v13.0: Returns MIN_SCORE penalty based on recent entry quality (MAE/MFE)."""
-        cfg = self.cfg
-        if not cfg.USE_TRADE_QUALITY:
-            return 0
-        if len(self.tq_mae_ratios) < cfg.TQ_MIN_TRADES:
-            return 0
-        # Calculate ratio of bad entries (MAE > threshold of SL)
-        bad_entries = sum(1 for r in self.tq_mae_ratios if r > cfg.TQ_MAE_THRESHOLD)
-        bad_ratio = bad_entries / len(self.tq_mae_ratios)
-        if bad_ratio > cfg.TQ_BAD_ENTRY_LIMIT:
-            return cfg.TQ_SCORE_PENALTY
-        return 0
-
-    def get_adaptive_exit_params(self, regime):
-        """v10.0: Get regime-specific exit parameters."""
-        if not self.cfg.USE_ADAPTIVE_EXIT or not self.cfg.USE_V10_ENGINE:
-            return {
-                'partial_tp_ratio': self.cfg.PARTIAL_TP_RATIO,
-                'be_atr_multi': self.cfg.BE_ATR_MULTI,
-                'trail_atr_multi': self.cfg.TRAIL_ATR_MULTI,
-                'ratchet_step': self.cfg.RATCHET_STEP_ATR,
-            }
-        cfg = self.cfg
-        if regime == 'trend':
-            return {
-                'partial_tp_ratio': cfg.TREND_PARTIAL_TP_RATIO,
-                'be_atr_multi': cfg.TREND_BE_ATR_MULTI,
-                'trail_atr_multi': cfg.TREND_TRAIL_ATR_MULTI,
-                'ratchet_step': cfg.TREND_RATCHET_STEP,
-            }
-        elif regime == 'range':
-            return {
-                'partial_tp_ratio': cfg.RANGE_PARTIAL_TP_RATIO,
-                'be_atr_multi': cfg.RANGE_BE_ATR_MULTI,
-                'trail_atr_multi': cfg.RANGE_TRAIL_ATR_MULTI,
-                'ratchet_step': cfg.RANGE_RATCHET_STEP,
-            }
-        else:  # high_vol
-            return {
-                'partial_tp_ratio': cfg.HIGHVOL_PARTIAL_TP_RATIO,
-                'be_atr_multi': cfg.HIGHVOL_BE_ATR_MULTI,
-                'trail_atr_multi': cfg.HIGHVOL_TRAIL_ATR_MULTI,
-                'ratchet_step': cfg.HIGHVOL_RATCHET_STEP,
-            }
-
-    def get_regime_pf_adjustment(self, regime):
-        """v10.0: Adjust MIN_SCORE based on recent regime performance."""
-        if not self.cfg.USE_REGIME_MEMORY or not self.cfg.USE_V10_ENGINE:
-            return 0
-
-        trades = self.regime_trade_pnls.get(regime, [])
-        if len(trades) < 10:
-            return 0
-
-        recent = trades[-self.cfg.REGIME_MEMORY_LOOKBACK:]
-        wins_sum = sum(p for p in recent if p > 0)
-        losses_sum = abs(sum(p for p in recent if p <= 0))
-
-        if losses_sum == 0:
-            return -1  # Very profitable, can be slightly more aggressive
-
-        pf = wins_sum / losses_sum
-        if pf < self.cfg.REGIME_POOR_PF:
-            return 2  # Poor PF → more selective
-        elif pf > self.cfg.REGIME_GOOD_PF:
-            return -1  # Good PF → slightly more aggressive
-        return 0
-
     # ---- v4.0 Attack Methods ----
 
     def get_momentum_burst(self, h4_row, h1_curr, m15_curr, m15_prev):
@@ -1431,61 +947,24 @@ class GoldBacktester:
         return 0
 
     def check_reversal(self, h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg):
-        """v13.0: Graduated reversal scoring (0-5 points).
-        Returns (direction, confidence) where confidence = score/5.
-        Previous version required all 4 conditions (RSI<25 + div + SR + candle).
-        New version uses score-based approach with minimum 2/5 threshold.
-        """
+        """Check for reversal setup: RSI extreme + divergence + S/R + candle pattern"""
         if not cfg.USE_REVERSAL_MODE:
-            return 0, 0.0
-
+            return 0
         rsi = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
-        rev_buy = 0
-        rev_sell = 0
 
-        # 1. RSI extreme (0-2 pts, graduated)
-        if rsi < 20:
-            rev_buy += 2
-        elif rsi < 30:
-            rev_buy += 1
-        if rsi > 80:
-            rev_sell += 2
-        elif rsi > 70:
-            rev_sell += 1
-
-        # 2. RSI Divergence (0-1 pt)
         h1_closes_series = h1_df[h1_mask]["Close"]
         h1_rsi_series = h1_df[h1_mask]["rsi"]
-        div_signal = get_divergence(h1_closes_series, h1_rsi_series,
-                                    cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
-        if div_signal > 0:
-            rev_buy += 1
-        elif div_signal < 0:
-            rev_sell += 1
-
-        # 3. S/R proximity (0-1 pt)
+        div_signal = get_divergence(h1_closes_series, h1_rsi_series, cfg.DIV_LOOKBACK, cfg.DIV_SWING_STRENGTH)
         sr_signal = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
-        if sr_signal > 0:
-            rev_buy += 1
-        elif sr_signal < 0:
-            rev_sell += 1
-
-        # 4. Candle pattern (0-1 pt)
         candle_signal = get_candle_pattern(h1_df, ct)
-        if candle_signal > 0:
-            rev_buy += 1
-        elif candle_signal < 0:
-            rev_sell += 1
 
-        # Minimum 2/5 threshold (relaxed from 4/4)
-        REVERSAL_MIN = 2
-        if rev_buy >= REVERSAL_MIN and rev_buy > rev_sell:
-            confidence = rev_buy / 5.0
-            return 1, confidence
-        if rev_sell >= REVERSAL_MIN and rev_sell > rev_buy:
-            confidence = rev_sell / 5.0
-            return -1, confidence
-        return 0, 0.0
+        # Bullish reversal: RSI oversold + bullish divergence + support + bullish candle
+        if rsi < 25 and div_signal > 0 and sr_signal > 0 and candle_signal > 0:
+            return 1
+        # Bearish reversal: RSI overbought + bearish divergence + resistance + bearish candle
+        if rsi > 75 and div_signal < 0 and sr_signal < 0 and candle_signal < 0:
+            return -1
+        return 0
 
     def run(self, h4_df, h1_df, m15_df, usdjpy_df=None):
         cfg = self.cfg
@@ -1540,54 +1019,22 @@ class GoldBacktester:
         print(f"   v4.0 Defense: News={cfg.USE_NEWS_FILTER} Weekend={cfg.USE_WEEKEND_CLOSE} CircuitBreaker={cfg.DAILY_MAX_LOSS_PCT}% CrashATR={cfg.CRASH_ATR_MULTI}x")
         print(f"   v4.0 Attack: MomentumBurst={cfg.USE_MOMENTUM_BURST} VolClimax={cfg.USE_VOLUME_CLIMAX} Pyramid={cfg.MAX_PYRAMID_POSITIONS} Reversal={cfg.USE_REVERSAL_MODE}")
         print(f"   v5.2: TrendSL Widen={cfg.TREND_SL_WIDEN}x Tighten={cfg.TREND_SL_TIGHTEN}x SlopePeriod={cfg.H4_SLOPE_PERIOD}")
-        if cfg.REGIME_METHOD != 'none':
-            print(f"   v8.0: Regime={cfg.REGIME_METHOD} ER_thresh={cfg.REGIME_ER_THRESHOLD} ScoreBoost={cfg.REGIME_SCORE_BOOST}")
-        if cfg.USE_REGIME_ADAPTIVE:
-            print(f"   v9.0: RegimeAdaptive=ON ER_trend={cfg.REGIME_ER_TREND} VolHigh={cfg.REGIME_VOL_HIGH} VolCrash={cfg.REGIME_VOL_CRASH}")
-            print(f"         TREND: min={cfg.TREND_MIN_SCORE} SL={cfg.TREND_SL_ATR_MULTI}x TP={cfg.TREND_TP_ATR_MULTI}x Pyramid={cfg.TREND_ALLOW_PYRAMID}")
-            print(f"         RANGE: min={cfg.RANGE_MIN_SCORE} SL={cfg.RANGE_SL_ATR_MULTI}x TP={cfg.RANGE_TP_ATR_MULTI}x MR={cfg.RANGE_MR_ENABLED}")
-            print(f"         HIGHVOL: min={cfg.HIGHVOL_MIN_SCORE} SL={cfg.HIGHVOL_SL_ATR_MULTI}x TP={cfg.HIGHVOL_TP_ATR_MULTI}x Lot={cfg.HIGHVOL_LOT_SCALE}x")
-        if cfg.USE_V10_ENGINE:
-            print(f"   v10.0: IntelligentRegime=ON Blend={cfg.USE_REGIME_BLENDING} CompEff={cfg.USE_COMPONENT_EFFECTIVENESS} SessionRegime={cfg.USE_SESSION_REGIME}")
-            print(f"          AdaptiveExit={cfg.USE_ADAPTIVE_EXIT} RegimeMemory={cfg.USE_REGIME_MEMORY}")
-        if cfg.USE_V11_RANGE:
-            print(f"   v11.0: RangeGuard=ON MacroER={cfg.V11_MACRO_ER_PERIOD}/{cfg.V11_MACRO_ER_THRESHOLD}")
-            print(f"          BurstCap={cfg.V11_BURST_CAP_IN_RANGE} H4Cap={cfg.V11_H4TREND_CAP_IN_RANGE} MaxScore={cfg.V11_RANGE_MAX_SCORE} MacroTP={cfg.V11_MACRO_RANGE_TP_MULTI}")
-
-
-        # v8.0: Pre-compute ER regime indicator on H4
-        if cfg.REGIME_METHOD == 'er':
-            er_period = cfg.REGIME_ER_PERIOD
-            net_change = abs(h4_df['Close'] - h4_df['Close'].shift(er_period))
-            sum_abs_changes = h4_df['Close'].diff().abs().rolling(window=er_period).sum()
-            h4_df['efficiency_ratio'] = net_change / sum_abs_changes.replace(0, np.nan)
-
-            # v13.0: Pre-compute fast ER (shorter lookback)
-            if cfg.USE_MULTISCALE_REGIME:
-                fast_period = cfg.REGIME_ER_FAST
-                fast_net = abs(h4_df['Close'] - h4_df['Close'].shift(fast_period))
-                fast_sum = h4_df['Close'].diff().abs().rolling(window=fast_period).sum()
-                h4_df['fast_er'] = fast_net / fast_sum.replace(0, np.nan)
-
-        # v11.0: Pre-compute macro ER (longer lookback for structural range detection)
-        if cfg.USE_V11_RANGE:
-            macro_period = cfg.V11_MACRO_ER_PERIOD
-            macro_net = abs(h4_df['Close'] - h4_df['Close'].shift(macro_period))
-            macro_sum = h4_df['Close'].diff().abs().rolling(window=macro_period).sum()
-            h4_df['macro_er'] = macro_net / macro_sum.replace(0, np.nan)
-
-            # v13.0: Slow ER (replaces macro ER for regime detection)
-            if cfg.USE_MULTISCALE_REGIME:
-                slow_period = cfg.REGIME_ER_SLOW
-                slow_net = abs(h4_df['Close'] - h4_df['Close'].shift(slow_period))
-                slow_sum = h4_df['Close'].diff().abs().rolling(window=slow_period).sum()
-                h4_df['slow_er'] = slow_net / slow_sum.replace(0, np.nan)
+        print(f"   v5.3: HardSessionFilter={cfg.USE_HARD_SESSION_FILTER}")
+        print(f"   v5.4: DeadZoneFilter={cfg.USE_DEAD_ZONE_FILTER} SkipScore11={cfg.SKIP_SCORE_11}")
+        print(f"   v6.0: SRAT={cfg.USE_SRAT} VolClimax={cfg.USE_VOLUME_CLIMAX} DD_ESC={cfg.DD_ESCALATION}")
 
         for i in range(100, total_bars):
             ct = m15_df.index[i]
             cc = m15_df["Close"].iloc[i]
             ch = m15_df["High"].iloc[i]
             cl = m15_df["Low"].iloc[i]
+            co = m15_df["Open"].iloc[i]
+            # v11.0: Use next bar's Open for entry to avoid look-ahead bias
+            # Signal generated at bar[i] Close -> entry at bar[i+1] Open (matches MT5 live)
+            next_bar_open = m15_df["Open"].iloc[i + 1] if i + 1 < total_bars else cc
+
+            # v10.0: Get bar spread from CSV data
+            _bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
 
             # v4.0: Daily circuit breaker reset
             bar_day = ct.date() if hasattr(ct, 'date') else ct
@@ -1600,7 +1047,8 @@ class GoldBacktester:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
-            self._manage_positions(ch, cl, cc, ct, i, m15_df)
+            self._manage_positions(ch, cl, cc, ct, i, m15_df,
+                                   bar_open=co, bar_spread_points=_bar_spread)
 
             if self.balance > self.peak_balance:
                 self.peak_balance = self.balance
@@ -1612,7 +1060,8 @@ class GoldBacktester:
             if self.check_weekend(ct):
                 if self.open_positions:
                     for pos in list(self.open_positions):
-                        self._close_position(pos, cc, ct, "Weekend", i)
+                        self._close_position(pos, cc, ct, "Weekend", i,
+                                             bar_spread_points=_bar_spread)
                     self.weekend_closes += 1
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
@@ -1648,27 +1097,6 @@ class GoldBacktester:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
 
-            # v13.0: Realtime volatility spike detection
-            if self.detect_realtime_spike(m15_df, i, current_atr):
-                self.spike_blocks += 1
-                self.spike_cooldown_until = i + self.cfg.SPIKE_COOLDOWN_BARS
-                # Close losing positions immediately on spike
-                if self.cfg.SPIKE_CLOSE_LOSING and self.open_positions:
-                    for pos in list(self.open_positions):
-                        if pos["direction"] == "BUY":
-                            unrealized = cc - pos["entry"]
-                        else:
-                            unrealized = pos["entry"] - cc
-                        if unrealized < 0:
-                            self._close_position(pos, cc, ct, "Spike", i)
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
-
-            # v13.0: Spike cooldown
-            if i < self.spike_cooldown_until:
-                self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                continue
-
             # v4.0: Advanced 4-state regime
             regime = self.get_advanced_regime(current_atr, current_atr_avg)
             if regime == 0:  # Crash - no new entries, only manage
@@ -1678,75 +1106,16 @@ class GoldBacktester:
 
             vol_ratio = current_atr / current_atr_avg
 
-            # v9.0: Regime-Adaptive Strategy
-            h4_er_val = None
-            macro_er_val = None
-            fast_er_val = None
-            slow_er_val = None
-            if cfg.REGIME_METHOD == 'er':
-                h4_mask_er = h4_df.index <= ct
-                if h4_mask_er.sum() > 0:
-                    h4_er_val = h4_df[h4_mask_er].iloc[-1].get("efficiency_ratio")
-                    # v11.0: Macro ER for structural range detection
-                    if cfg.USE_V11_RANGE:
-                        macro_er_val = h4_df[h4_mask_er].iloc[-1].get("macro_er")
-                    # v13.0: Multi-scale ER values
-                    if cfg.USE_MULTISCALE_REGIME:
-                        fast_er_val = h4_df[h4_mask_er].iloc[-1].get("fast_er")
-                        slow_er_val = h4_df[h4_mask_er].iloc[-1].get("slow_er")
-
-            # v11.0: Determine if we're in a macro-range environment
-            is_macro_range = False
-            if cfg.USE_V11_RANGE and pd.notna(macro_er_val):
-                is_macro_range = macro_er_val < cfg.V11_MACRO_ER_THRESHOLD
-
-            if cfg.USE_REGIME_ADAPTIVE:
-                if cfg.USE_MULTISCALE_REGIME:
-                    current_regime = self.detect_regime_v13(fast_er_val, h4_er_val, slow_er_val, vol_ratio)
-                    self.update_regime_stability(current_regime, i)
-                else:
-                    current_regime = self.detect_regime_v9(h4_er_val, vol_ratio)
-                self.current_regime = current_regime
-                self.regime_stats[current_regime] = self.regime_stats.get(current_regime, 0) + 1
-
-                if current_regime == 'crash':
-                    self.crash_skips += 1
-                    self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
-                    continue
-
-
-                # v10.0: Update regime blend weights
-                self.update_regime_blend(current_regime)
-
-                # v10.0: Use blended profile instead of hard switch
-                if cfg.USE_V10_ENGINE and cfg.USE_REGIME_BLENDING:
-                    profile = self.get_blended_profile(current_regime)
-                else:
-                    profile = self.get_regime_profile(current_regime)
-                sl_multi = profile['sl_multi']
-                tp_multi = profile['tp_multi']
-                # v9.0: In trend regime with elevated vol, widen SL slightly
-                if current_regime == 'trend' and vol_ratio >= 1.2:
-                    sl_multi += 0.3  # Modest SL bonus for elevated vol in trend
-            else:
-                current_regime = 'trend'  # Default behavior
-                profile = None
-                sl_multi = cfg.SL_ATR_MULTI
-                tp_multi = cfg.TP_ATR_MULTI
-                # v8.2 legacy: Graduated SL bonus
-                if cfg.GRADUATED_SL:
-                    sl_bonus = max(0, (vol_ratio - cfg.GRADUATED_SL_START)) * cfg.GRADUATED_SL_SCALE
-                    sl_bonus = min(sl_bonus, cfg.GRADUATED_SL_CAP)
-                    sl_multi += sl_bonus
-                else:
-                    if vol_ratio > cfg.VOL_REGIME_HIGH:
-                        sl_multi += cfg.HIGH_VOL_SL_BONUS
+            # High volatility regime: SL bonus
+            sl_multi = cfg.SL_ATR_MULTI
+            if vol_ratio > cfg.VOL_REGIME_HIGH:
+                sl_multi += cfg.HIGH_VOL_SL_BONUS
 
             # v2.0: Dynamic SL/TP in points
             atr_points = current_atr / cfg.POINT
             dynamic_sl_points = atr_points * sl_multi
             dynamic_sl_points = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, dynamic_sl_points))
-            dynamic_tp_points = atr_points * tp_multi
+            dynamic_tp_points = atr_points * cfg.TP_ATR_MULTI
             # Ensure minimum RR 1:1.5
             if dynamic_tp_points < dynamic_sl_points * 1.5:
                 dynamic_tp_points = dynamic_sl_points * 1.5
@@ -1757,6 +1126,13 @@ class GoldBacktester:
                 self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
                 continue
             h4_row = h4_df[h4_mask].iloc[-1]
+
+            # v6.2: Ranging Regime Adaptation — detect if H4 shows no trend
+            is_ranging = False
+            if cfg.USE_RANGING_ADAPTATION:
+                h4_adx_val = h4_row.get("adx") if pd.notna(h4_row.get("adx")) else 25
+                if h4_adx_val < cfg.RANGING_ADX_THRESHOLD:
+                    is_ranging = True
 
             # H1 data lookup
             h1_mask = h1_df.index <= ct
@@ -1801,19 +1177,17 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[1] = -1
 
-            # 3. H1 RSI (1 pt) -- symmetric ranges for bull/bear
+            # 3. H1 RSI (1 pt) -- exclusive ranges
             if pd.notna(h1_curr["rsi"]):
                 rsi_val = h1_curr["rsi"]
                 if 40 < rsi_val < 60:
                     buy_score += 1
                     sell_score += 1
                     component_mask[2] = 1
-                elif 60 <= rsi_val < 70:
-                    # Momentum zone: reward trend-following direction
+                elif 60 <= rsi_val < 65:
                     buy_score += 1
                     component_mask[2] = 1
-                elif 30 < rsi_val <= 40:
-                    # Momentum zone: reward trend-following direction
+                elif 35 < rsi_val <= 40:
                     sell_score += 1
                     component_mask[2] = -1
 
@@ -1892,14 +1266,16 @@ class GoldBacktester:
                     sell_score += 2
                     component_mask[9] = -1
 
-            # 11. v3.0: S/R Level (+1, no penalty to opposite side)
+            # 11. v3.0: S/R Level (+1/-1)
             if cfg.USE_SR_LEVELS:
                 sr = get_sr_signal(h1_df, ct, cc, current_atr, cfg)
                 if sr == 1:
                     buy_score += 1
+                    sell_score -= 1
                     component_mask[10] = 1
                 elif sr == -1:
                     sell_score += 1
+                    buy_score -= 1
                     component_mask[10] = -1
 
             # 12. v3.0: Candle Pattern (+1)
@@ -1944,98 +1320,22 @@ class GoldBacktester:
             buy_score = max(0, buy_score)
             sell_score = max(0, sell_score)
 
-            # v11.0: Dampen trend-following components in range regime only
-            # Problem: Momentum Burst(3pt) + H4 Trend(3pt) = 6pt boost → high score
-            # but in range markets, these signals cause score inversion (high score = lose)
-            # Note: Only apply to regime='range', NOT macro-range (to preserve trend profits)
-            if cfg.USE_V11_RANGE and current_regime == 'range':
-                # Cap Momentum Burst contribution
-                if component_mask[13] != 0:  # Momentum Burst was scored
-                    burst_pts = 3  # Original Momentum Burst points
-                    cap = cfg.V11_BURST_CAP_IN_RANGE
-                    reduction = burst_pts - cap
-                    if reduction > 0:
-                        if component_mask[13] == 1:
-                            buy_score -= reduction
-                        else:
-                            sell_score -= reduction
-
-                # Cap H4 Trend contribution
-                if component_mask[0] != 0:  # H4 Trend was scored
-                    h4_pts = 3  # Original H4 Trend points
-                    cap = cfg.V11_H4TREND_CAP_IN_RANGE
-                    reduction = h4_pts - cap
-                    if reduction > 0:
-                        if component_mask[0] == 1:
-                            buy_score -= reduction
-                        else:
-                            sell_score -= reduction
-
-                # Re-clamp after reduction
-                buy_score = max(0, buy_score)
-                sell_score = max(0, sell_score)
-
-            # v10.0: Apply component effectiveness multipliers
-            if cfg.USE_V10_ENGINE and cfg.USE_COMPONENT_EFFECTIVENESS:
-                # Re-weight scores based on component effectiveness
-                # Only adjust components with significant weight (>= 2 pts)
-                for comp_idx in [0, 1, 4, 8, 9, 13, 14]:  # H4Trend, H1MA, M15MA, Corr, Div, Burst, Vol
-                    eff = self.get_component_effectiveness(comp_idx)
-                    if eff != 1.0 and component_mask[comp_idx] != 0:
-                        # Get base points for this component
-                        base_pts = {0: 3, 1: 2, 4: 2, 8: 2, 9: 2, 13: 3, 14: 2}
-                        pts = base_pts.get(comp_idx, 1)
-                        adjustment = int(round(pts * (eff - 1.0)))
-                        if component_mask[comp_idx] == 1:
-                            buy_score += adjustment
-                        elif component_mask[comp_idx] == -1:
-                            sell_score += adjustment
-
-            # v9.0: Apply regime-specific component bonuses
-            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                component_bonus = profile.get('component_bonus', {})
-                for comp_idx, bonus in component_bonus.items():
-                    if component_mask[comp_idx] == 1:
-                        buy_score += bonus
-                    elif component_mask[comp_idx] == -1:
-                        sell_score += bonus
-
-            # v13.0: Correlation cap - reduce double-counting from correlated components
-            if cfg.USE_CORRELATION_CAP:
-                buy_score, sell_score = self.apply_correlation_cap(buy_score, sell_score, component_mask)
-
-            # ---- v9.0/v4.0: Dynamic score barrier ----
-            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                dynamic_min_score = profile['min_score']
+            # ---- v6.0: Session-Regime Adaptive Threshold (SRAT) ----
+            if cfg.USE_SRAT and hour in cfg.SRAT_THRESHOLDS:
+                dynamic_min_score = cfg.SRAT_THRESHOLDS[hour]
             else:
                 dynamic_min_score = cfg.MIN_SCORE  # 9
-
-            # v10.0: Regime performance memory adjustment
-            if cfg.USE_V10_ENGINE and cfg.USE_REGIME_MEMORY:
-                regime_pf_adj = self.get_regime_pf_adjustment(current_regime)
-                dynamic_min_score = max(cfg.MIN_SCORE - 1, dynamic_min_score + regime_pf_adj)
-
-            # v13.0: Trade quality penalty
-            dynamic_min_score += self.get_entry_quality_penalty()
-
-            # DD-based escalation (applies to all regimes)
-            if current_dd >= 20.0:
-                dynamic_min_score = max(dynamic_min_score, 18)
-            elif current_dd >= 15.0:
-                dynamic_min_score = max(dynamic_min_score, 15)
-            elif current_dd >= 10.0:
-                dynamic_min_score = max(dynamic_min_score, 12)
-
-            # Legacy: ATR-based ranging (only when regime adaptive is off)
-            if not cfg.USE_REGIME_ADAPTIVE:
-                if regime == 1:  # Ranging (ATR-based)
-                    dynamic_min_score += 3
-                # v8.0: ER Regime Detection
-                if cfg.REGIME_METHOD == 'er':
-                    h4_er = h4_row.get("efficiency_ratio")
-                    if pd.notna(h4_er) and h4_er < cfg.REGIME_ER_THRESHOLD:
-                        dynamic_min_score += cfg.REGIME_SCORE_BOOST
-
+            # DD escalation stacks on top of session base
+            dd_esc = getattr(cfg, 'DD_ESCALATION', [(10, 12), (15, 15), (20, 18)])
+            for dd_thresh, dd_score in sorted(dd_esc, reverse=True):
+                if current_dd >= dd_thresh:
+                    dynamic_min_score = max(dynamic_min_score, dd_score)
+                    break
+            if regime == 1:  # Ranging
+                dynamic_min_score += 3
+            # v6.2: Additional boost when H4 ADX confirms no trend
+            if is_ranging and cfg.USE_RANGING_ADAPTATION:
+                dynamic_min_score = max(dynamic_min_score, dynamic_min_score + cfg.RANGING_SCORE_BOOST)
 
             # ---- v3.0: Equity Curve Filter ----
             lot_multiplier = 1.0
@@ -2044,72 +1344,38 @@ class GoldBacktester:
                 if np.mean(recent) < 0:
                     lot_multiplier = cfg.EQUITY_REDUCE_FACTOR
 
-            # v11.0: Score ceiling in range regime (prevents score inversion)
-            # Data shows Score>=16 has WR 37% in 2022-24: high score = false confidence
-            if cfg.USE_V11_RANGE and current_regime == 'range':
-                max_score = cfg.V11_RANGE_MAX_SCORE
-                buy_score = min(buy_score, max_score)
-                sell_score = min(sell_score, max_score)
-
             # v4.0: Momentum burst TP multiplier
             tp_multi = 1.5 if abs(burst) == 3 else 1.0
             adjusted_tp_points = dynamic_tp_points * tp_multi
 
-            # ---- v9.0/v4.0: Pyramiding support ----
-            pos_count = len(self.open_positions)
-            allow_pyramid = cfg.TREND_ALLOW_PYRAMID  # default
-            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                allow_pyramid = profile['allow_pyramid']
+            # v6.2: Ranging Regime Adaptation -- cap TP after burst multiplier
+            if is_ranging and cfg.USE_RANGING_ADAPTATION:
+                ranging_tp = atr_points * cfg.RANGING_TP_CAP
+                if ranging_tp < adjusted_tp_points:
+                    adjusted_tp_points = ranging_tp
+                if adjusted_tp_points < dynamic_sl_points * 1.5:
+                    adjusted_tp_points = dynamic_sl_points * 1.5
 
+            # ---- v4.0: Pyramiding support ----
+            pos_count = len(self.open_positions)
             can_enter = pos_count < cfg.MAX_PYRAMID_POSITIONS
             is_pyramid = pos_count > 0
             pyramid_ok = True
 
             if is_pyramid:
-                if not allow_pyramid:
-                    pyramid_ok = False
-                # v11.0: Block pyramids in macro-range (even if regime=trend)
-                if pyramid_ok and cfg.USE_V11_RANGE and is_macro_range and not cfg.V11_MACRO_RANGE_PYRAMID:
-                    pyramid_ok = False
-                # v8.1 legacy: Block pyramids during high-volatility (non-adaptive mode)
-                if pyramid_ok and not cfg.USE_REGIME_ADAPTIVE:
-                    if cfg.HIGH_VOL_PYRAMID_BLOCK is not None and vol_ratio > cfg.HIGH_VOL_PYRAMID_BLOCK:
-                        pyramid_ok = False
                 # Check if existing positions are profitable
-                if pyramid_ok:
-                    for pos in self.open_positions:
-                        if pos["direction"] == "BUY":
-                            unrealized = cc - pos["entry"]
-                        else:
-                            unrealized = pos["entry"] - cc
-                        if unrealized <= 0:
-                            pyramid_ok = False
-                            break
+                for pos in self.open_positions:
+                    if pos["direction"] == "BUY":
+                        unrealized = cc - pos["entry"]
+                    else:
+                        unrealized = pos["entry"] - cc
+                    if unrealized <= 0:
+                        pyramid_ok = False
+                        break
 
             # ---- Entry ----
             entry_type = "normal"
             entered = False
-
-            # v9.0: Regime-specific lot scaling
-            regime_lot_scale = 1.0
-            if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                regime_lot_scale = profile['lot_scale']
-
-            # v10.0: Session-Regime lot modifier
-            session_lot_mod = 1.0
-            if cfg.USE_V10_ENGINE and cfg.USE_SESSION_REGIME:
-                session = self.get_session(hour)
-                session_lot_mod = self.get_session_lot_modifier(session, current_regime)
-                self.session_stats[session] = self.session_stats.get(session, 0) + 1
-
-            # v10.1: ATR spike lot cap - prevent large positions during extreme volatility
-            if vol_ratio > 2.0:
-                regime_lot_scale = min(regime_lot_scale, 0.3)
-                session_lot_mod = min(session_lot_mod, 0.3)
-
-            # v13.0: Regime transition lot penalty
-            if cfg.USE_MULTISCALE_REGIME:
-                regime_lot_scale *= self.regime_transition_mult
 
             if can_enter and (not is_pyramid or pyramid_ok):
                 pyramid_lot_multi = 1.0
@@ -2117,35 +1383,21 @@ class GoldBacktester:
                     pyramid_lot_multi = cfg.PYRAMID_LOT_DECAY ** pos_count
                     entry_type = "pyramid"
 
-                # v9.0/v5.2/v7.0: Regime-aware trend-aligned SL/TP adjustment
+                # v5.2: Trend-aligned SL adjustment
+                # With macro trend: wider SL (survive pullbacks)
+                # Against macro trend: tighter SL (cut losses faster)
                 adj_sl = dynamic_sl_points
                 adj_tp = adjusted_tp_points
                 if macro_trend_dir != 0:
-                    # Use regime-specific widen/extend factors
-                    if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                        sl_widen = profile['sl_widen']
-                        tp_extend = profile['tp_extend']
-                    else:
-                        sl_widen = cfg.TREND_SL_WIDEN
-                        tp_extend = cfg.TREND_TP_EXTEND
-
                     if (buy_score > sell_score and macro_trend_dir == 1) or \
                        (sell_score > buy_score and macro_trend_dir == -1):
-                        # With-trend: wider SL + extended TP
-                        adj_sl = min(dynamic_sl_points * sl_widen, cfg.MAX_SL_POINTS)
-                        adj_tp = adjusted_tp_points * tp_extend
+                        adj_sl = min(dynamic_sl_points * cfg.TREND_SL_WIDEN, cfg.MAX_SL_POINTS)
                     elif (buy_score > sell_score and macro_trend_dir == -1) or \
                          (sell_score > buy_score and macro_trend_dir == 1):
-                        # Counter-trend: tighter SL + tighter TP
                         adj_sl = max(dynamic_sl_points * cfg.TREND_SL_TIGHTEN, cfg.MIN_SL_POINTS)
-                        adj_tp = adjusted_tp_points * cfg.TREND_TP_TIGHTEN
 
-                # v9.0/v6.0: Score margin filter
-                if cfg.USE_REGIME_ADAPTIVE and profile is not None:
-                    score_margin = profile['score_margin']
-                else:
-                    score_margin = cfg.SCORE_MARGIN_MIN
-                # v10.1: RSI Momentum Confirmation
+                # v8.0: RSI Momentum Confirmation
+                # Block entries where H1 RSI doesn't confirm momentum direction
                 if getattr(cfg, 'USE_RSI_MOMENTUM_CONFIRM', False):
                     rsi_val = h1_curr["rsi"] if pd.notna(h1_curr.get("rsi")) else 50
                     rsi_lb = getattr(cfg, 'RSI_MOMENTUM_LOOKBACK', 3)
@@ -2160,75 +1412,58 @@ class GoldBacktester:
                         if not (rsi_val < 50 and rsi_val < rsi_past):
                             sell_score = 0
 
-                # v6.0: Get actual spread from CSV data
-                bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
+                # v7.0: Macro-Trend Filter - block counter-trend entries
+                effective_buy = buy_score
+                effective_sell = sell_score
+                if getattr(cfg, 'USE_MACRO_TREND_FILTER', False):
+                    h4_adx_for_filter = h4_row.get("adx") if pd.notna(h4_row.get("adx")) else 0
+                    if h4_adx_for_filter >= cfg.MACRO_TREND_ADX_THRESHOLD:
+                        h4_bull = pd.notna(h4_row.get("ma_fast")) and h4_row["ma_fast"] > h4_row["ma_slow"]
+                        h4_bear = pd.notna(h4_row.get("ma_fast")) and h4_row["ma_fast"] < h4_row["ma_slow"]
+                        if h4_bull:
+                            effective_sell = 0  # Block SELL in H4 uptrend
+                        elif h4_bear:
+                            effective_buy = 0   # Block BUY in H4 downtrend
 
-                if buy_score >= dynamic_min_score and (buy_score - sell_score) >= score_margin:
-                    self._open_trade("BUY", cc, ct, buy_score, current_dd,
+                if effective_buy >= dynamic_min_score and effective_buy > effective_sell:
+                    self._open_trade("BUY", next_bar_open, ct, buy_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
-                                     component_mask,
+                                     lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i, bar_spread=bar_spread)
+                                     entry_bar=i, bar_spread_points=_bar_spread)
                     entered = True
-                    if current_regime in self.regime_trades:
-                        self.regime_trades[current_regime].append(entry_type)
-                elif sell_score >= dynamic_min_score and (sell_score - buy_score) >= score_margin:
-                    self._open_trade("SELL", cc, ct, sell_score, current_dd,
+                elif effective_sell >= dynamic_min_score and effective_sell > effective_buy:
+                    self._open_trade("SELL", next_bar_open, ct, sell_score, current_dd,
                                      adj_sl, adj_tp, current_atr,
-                                     lot_multiplier * pyramid_lot_multi * regime_lot_scale * session_lot_mod,
-                                     component_mask,
+                                     lot_multiplier * pyramid_lot_multi, component_mask,
                                      entry_type=entry_type, momentum_burst=(abs(burst) == 3),
-                                     entry_bar=i, bar_spread=bar_spread)
+                                     entry_bar=i, bar_spread_points=_bar_spread)
                     entered = True
-                    if current_regime in self.regime_trades:
-                        self.regime_trades[current_regime].append(entry_type)
 
-            # v9.0/v13.0: Mean-reversion entry for RANGE regime (unified MR path)
-            if not entered and pos_count == 0 and cfg.USE_MEAN_REVERSION and cfg.USE_REGIME_ADAPTIVE and current_regime in ('range', 'high_vol_range') and vol_ratio < 1.0:
-                mr_dir, mr_score = self.check_mean_reversion_entry(
-                    h1_curr, h1_prev, cc, current_atr, h1_df, h1_mask, ct)
-                if mr_dir is not None:
-                    mr_sl = atr_points * cfg.RANGE_MR_SL_ATR
-                    mr_sl = max(cfg.MIN_SL_POINTS, min(cfg.MAX_SL_POINTS, mr_sl))
-                    mr_tp = atr_points * cfg.RANGE_MR_TP_ATR
-                    if mr_tp < mr_sl * 1.2:
-                        mr_tp = mr_sl * 1.2
-                    bar_spread = m15_df["Spread"].iloc[i] if "Spread" in m15_df.columns else None
-                    self._open_trade(mr_dir, cc, ct, mr_score, current_dd,
-                                     mr_sl, mr_tp, current_atr,
-                                     lot_multiplier * cfg.RANGE_MR_LOT_SCALE * session_lot_mod,
-                                     component_mask,
-                                     entry_type="mean_reversion",
-                                     entry_bar=i, bar_spread=bar_spread)
-                    entered = True
-                    self.mr_trades += 1
-                    if 'range' in self.regime_trades:
-                        self.regime_trades['range'].append('mean_reversion')
-
-            # v13.0: Graduated reversal mode - confidence-scaled lot sizing
-            if not entered and pos_count == 0 and current_regime not in ('range', 'crash'):
-                rev_dir, rev_confidence = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
-                if rev_dir != 0:
-                    # Scale lot by confidence: 2/5=0.2x, 3/5=0.3x, 4/5=0.4x, 5/5=0.5x
-                    rev_lot_scale = rev_confidence * 0.5
-                    if rev_dir == 1:
-                        self._open_trade("BUY", cc, ct, 0, current_dd,
-                                         dynamic_sl_points, dynamic_tp_points, current_atr,
-                                         lot_multiplier * rev_lot_scale * regime_lot_scale * session_lot_mod, component_mask,
-                                         entry_type="reversal", entry_bar=i)
-                    else:
-                        self._open_trade("SELL", cc, ct, 0, current_dd,
-                                         dynamic_sl_points, dynamic_tp_points, current_atr,
-                                         lot_multiplier * rev_lot_scale * regime_lot_scale * session_lot_mod, component_mask,
-                                         entry_type="reversal", entry_bar=i)
+            # v4.0: Reversal mode - only when no normal entry and no open positions
+            if not entered and pos_count == 0:
+                reversal = self.check_reversal(h1_df, h1_mask, ct, cc, current_atr, h1_curr, cfg)
+                if reversal == 1:
+                    self._open_trade("BUY", next_bar_open, ct, 0, current_dd,
+                                     dynamic_sl_points, dynamic_tp_points, current_atr,
+                                     lot_multiplier * 0.5, component_mask,
+                                     entry_type="reversal", entry_bar=i,
+                                     bar_spread_points=_bar_spread)
+                elif reversal == -1:
+                    self._open_trade("SELL", next_bar_open, ct, 0, current_dd,
+                                     dynamic_sl_points, dynamic_tp_points, current_atr,
+                                     lot_multiplier * 0.5, component_mask,
+                                     entry_type="reversal", entry_bar=i,
+                                     bar_spread_points=_bar_spread)
 
             self.equity_curve.append({"time": ct, "equity": self.balance + self._unrealized_pnl(cc)})
 
         # Final close
         fc = m15_df["Close"].iloc[-1]
+        _final_spread = m15_df["Spread"].iloc[-1] if "Spread" in m15_df.columns else None
         for pos in list(self.open_positions):
-            self._close_position(pos, fc, m15_df.index[-1], "EndOfPeriod", total_bars - 1)
+            self._close_position(pos, fc, m15_df.index[-1], "EndOfPeriod", total_bars - 1,
+                                 bar_spread_points=_final_spread)
 
         print("[OK] Backtest complete")
 
@@ -2276,18 +1511,23 @@ class GoldBacktester:
                     sl_points, tp_points, current_atr,
                     lot_multiplier=1.0, component_mask=None,
                     entry_type="normal", momentum_burst=False, entry_bar=0,
-                    bar_spread=None):
+                    bar_spread_points=None):
         cfg = self.cfg
         pt = cfg.POINT
 
-        # v6.0: Realistic spread from CSV + slippage
-        if cfg.USE_REALISTIC_SPREAD and bar_spread is not None and bar_spread > 0:
-            spread = bar_spread * pt
+        # v10.0: Use actual bar spread if available, otherwise fall back to fixed estimate
+        if getattr(cfg, 'USE_REALISTIC_SPREAD', False) and bar_spread_points is not None:
+            half_spread = bar_spread_points * pt * 0.5
+            slippage = getattr(cfg, 'SLIPPAGE_POINTS', 0) * pt
         else:
-            spread = cfg.MAX_SPREAD_POINTS * pt * 0.5
-        slippage = cfg.SLIPPAGE_POINTS * pt
+            half_spread = cfg.MAX_SPREAD_POINTS * pt * 0.5
+            slippage = 0
 
-        entry = price + spread + slippage if direction == "BUY" else price - spread - slippage
+        # BUY entry at Ask (mid + half_spread + slippage), SELL entry at Bid (mid - half_spread - slippage)
+        if direction == "BUY":
+            entry = price + half_spread + slippage
+        else:
+            entry = price - half_spread - slippage
         if direction == "BUY":
             sl = entry - sl_points * pt
             tp = entry + tp_points * pt
@@ -2319,21 +1559,29 @@ class GoldBacktester:
             "entry_type": entry_type,
             "momentum_burst": momentum_burst,
             "entry_bar": entry_bar,
-            "regime": self.current_regime,  # v9.0
         }
         # v3.0: Store component mask
         if component_mask is not None:
             pos["component_mask"] = component_mask[:]
         self.open_positions.append(pos)
 
-    def _manage_positions(self, high, low, close, time, bar_idx, m15_df):
+    def _manage_positions(self, high, low, close, time, bar_idx, m15_df,
+                          bar_open=None, bar_spread_points=None):
         cfg = self.cfg
         pt = cfg.POINT
-        for pos in list(self.open_positions):
-            # v10.0: Get regime-specific exit parameters
-            pos_regime = pos.get("regime", "trend")
-            exit_params = self.get_adaptive_exit_params(pos_regime)
 
+        # v10.0: Compute spread-adjusted exit prices for SL/TP
+        _realistic = getattr(cfg, 'USE_REALISTIC_SPREAD', False)
+        _intrabar = getattr(cfg, 'USE_INTRABAR_SLTP_ORDER', False)
+        if _realistic and bar_spread_points is not None:
+            half_spread = bar_spread_points * pt * 0.5
+        else:
+            half_spread = 0  # legacy: no spread on exits
+
+        # v10.0: Commission for partial closes
+        commission_per_lot = getattr(cfg, 'COMMISSION_PER_LOT', 0)
+
+        for pos in list(self.open_positions):
             # v4.0: Stale trade exit
             if self.check_stale_trade(pos, bar_idx):
                 # Only close if not losing (close at current price if profitable or breakeven)
@@ -2342,16 +1590,33 @@ class GoldBacktester:
                 else:
                     unrealized = pos["entry"] - close
                 if unrealized >= 0:
-                    self._close_position(pos, close, time, "Stale", bar_idx)
+                    self._close_position(pos, close, time, "Stale", bar_idx,
+                                         bar_spread_points=bar_spread_points)
                     continue
 
             if pos["direction"] == "BUY":
-                # SL check
-                if low <= pos["sl"]:
+                # BUY exits at Bid: Low already represents Bid-side
+                # SL triggered when Bid <= SL, TP triggered when Bid >= TP
+                # Since OHLC data is Bid-based for most brokers, use as-is
+                sl_hit = (low <= pos["sl"])
+                tp_hit = (high >= pos["tp"])
+
+                # v10.0: Intra-bar SL/TP order determination
+                if sl_hit and tp_hit and _intrabar and bar_open is not None:
+                    # Both SL and TP within this bar's range
+                    dist_to_sl = abs(bar_open - pos["sl"])
+                    dist_to_tp = abs(pos["tp"] - bar_open)
+                    if dist_to_sl <= dist_to_tp:
+                        # Open closer to SL -> SL hit first
+                        self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    else:
+                        # Open closer to TP -> TP hit first
+                        self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    continue
+                elif sl_hit:
                     self._close_position(pos, pos["sl"], time, "SL", bar_idx)
                     continue
-                # TP check
-                if high >= pos["tp"]:
+                elif tp_hit:
                     self._close_position(pos, pos["tp"], time, "TP", bar_idx)
                     continue
 
@@ -2359,19 +1624,9 @@ class GoldBacktester:
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
 
-                # v13.0: Track MAE/MFE
-                if 'mae' not in pos:
-                    pos['mae'] = 0.0
-                    pos['mfe'] = 0.0
-                adverse = pos["entry"] - low   # How far price went against us
-                favorable = high - pos["entry"]  # How far price went for us
-                pos['mae'] = max(pos['mae'], adverse)
-                pos['mfe'] = max(pos['mfe'], favorable)
-
-                # v10.0/v2.0: Partial close with regime-adaptive ratio
+                # v2.0: Partial close at 50% of TP distance
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
-                    partial_tp_ratio = exit_params['partial_tp_ratio']
-                    if profit_price >= pos["tp_dist"] * partial_tp_ratio:
+                    if profit_price >= pos["tp_dist"] * cfg.PARTIAL_TP_RATIO:
                         # Close 50% of position
                         closed_lot = pos["original_lot"] * cfg.PARTIAL_CLOSE_RATIO
                         remaining_lot = pos["lot"] - closed_lot
@@ -2380,9 +1635,14 @@ class GoldBacktester:
                             closed_lot = pos["lot"] - remaining_lot
 
                         if closed_lot > 0:
-                            # Record partial close profit
-                            pnl_pts_partial = profit_pts
+                            # v10.1: Apply exit spread to partial close (BUY sells at Bid)
+                            partial_exit = close - half_spread  # half_spread=0 if not realistic
+                            partial_profit = partial_exit - pos["entry"]
+                            pnl_pts_partial = partial_profit / pt
                             pnl_usd = pnl_pts_partial * pt * cfg.CONTRACT_SIZE * closed_lot
+                            # v10.0: Commission on partial close (proportional)
+                            if commission_per_lot > 0:
+                                pnl_usd -= commission_per_lot * closed_lot * 0.5  # half of round-trip
                             pnl_jpy = pnl_usd * 150.0
                             self.balance += pnl_jpy
                             self.peak_balance = max(self.peak_balance, self.balance)
@@ -2392,7 +1652,7 @@ class GoldBacktester:
                                 "close_time": time,
                                 "direction": pos["direction"],
                                 "entry": round(pos["entry"], 2),
-                                "exit": round(close, 2),
+                                "exit": round(partial_exit, 2),
                                 "lot": closed_lot,
                                 "pnl_pts": round(pnl_pts_partial, 1),
                                 "pnl_usd": round(pnl_usd, 2),
@@ -2411,58 +1671,48 @@ class GoldBacktester:
                         pos["partial_done"] = True
                         pos["breakeven_done"] = True
 
-                # v10.0/v2.0: Breakeven with regime-adaptive threshold
-                be_multi = exit_params['be_atr_multi']
-                if not pos["breakeven_done"] and profit_price >= atr_entry * be_multi:
+                # v2.0: Breakeven at ATR * BE_ATR_MULTI
+                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     pos["sl"] = pos["entry"] + 10 * pt
                     pos["breakeven_done"] = True
 
-                # v10.0/v2.0: Trailing with regime-adaptive step
-                trail_multi = exit_params['trail_atr_multi']
-                be_price = atr_entry * be_multi
+                # v2.0: Trailing at BE * 1.5, step = ATR * TRAIL_ATR_MULTI
+                be_price = atr_entry * cfg.BE_ATR_MULTI
                 if profit_price >= be_price * 1.5:
-                    trail_step = atr_entry * trail_multi
+                    trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
                     ns = close - trail_step
                     if ns > pos["sl"] + 5 * pt:
                         pos["sl"] = ns
 
-                # v10.0/v6.0: ATR ratchet trail with regime-adaptive step
-                if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
-                    atr_multiples = profit_price / atr_entry
-                    ratchet_base = exit_params['ratchet_step']
-                    if atr_multiples >= 2.0:
-                        ratchet_step = atr_entry * max(0.3, ratchet_base * (1.0 / atr_multiples * 2))
-                        ratchet_sl = close - ratchet_step
-                        if ratchet_sl > pos["sl"] + 5 * pt:
-                            pos["sl"] = ratchet_sl
-
                 # v3.0: Chandelier Exit for BUY
-                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * be_multi:
+                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     highest_high = m15_df["High"].iloc[start_idx:bar_idx + 1].max()
                     chandelier_sl = highest_high - atr_entry * cfg.CHANDELIER_ATR_MULTI
                     if chandelier_sl > pos["sl"] + 5 * pt:
                         pos["sl"] = chandelier_sl
 
-                # v6.0: Time-decay SL tightening for losing trades
-                if cfg.USE_TIME_DECAY_SL and not pos["breakeven_done"]:
-                    bars_open = bar_idx - pos.get("entry_bar", bar_idx)
-                    if bars_open >= cfg.TIME_DECAY_START_BARS:
-                        decay_periods = (bars_open - cfg.TIME_DECAY_START_BARS) / cfg.TIME_DECAY_START_BARS
-                        decay_factor = cfg.TIME_DECAY_RATE ** decay_periods
-                        original_sl_dist = pos["sl_points"] * pt
-                        decayed_sl_dist = max(cfg.MIN_SL_POINTS * pt, original_sl_dist * decay_factor)
-                        new_sl = pos["entry"] - decayed_sl_dist
-                        if new_sl > pos["sl"]:
-                            pos["sl"] = new_sl
-
             else:  # SELL
-                # SL check
-                if high >= pos["sl"]:
+                # SELL exits at Ask: High + spread represents Ask-side
+                # SL triggered when Ask >= SL, TP triggered when Ask <= TP
+                # For SELL: SL hit check uses high (Ask side moves against us)
+                # TP hit check uses low (Bid side moves in our favor)
+                sl_hit = (high >= pos["sl"])
+                tp_hit = (low <= pos["tp"])
+
+                # v10.0: Intra-bar SL/TP order determination
+                if sl_hit and tp_hit and _intrabar and bar_open is not None:
+                    dist_to_sl = abs(pos["sl"] - bar_open)
+                    dist_to_tp = abs(bar_open - pos["tp"])
+                    if dist_to_sl <= dist_to_tp:
+                        self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    else:
+                        self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    continue
+                elif sl_hit:
                     self._close_position(pos, pos["sl"], time, "SL", bar_idx)
                     continue
-                # TP check
-                if low <= pos["tp"]:
+                elif tp_hit:
                     self._close_position(pos, pos["tp"], time, "TP", bar_idx)
                     continue
 
@@ -2470,19 +1720,9 @@ class GoldBacktester:
                 profit_pts = profit_price / pt
                 atr_entry = pos["atr_at_entry"]
 
-                # v13.0: Track MAE/MFE
-                if 'mae' not in pos:
-                    pos['mae'] = 0.0
-                    pos['mfe'] = 0.0
-                adverse = high - pos["entry"]  # How far price went against us (SELL)
-                favorable = pos["entry"] - low  # How far price went for us (SELL)
-                pos['mae'] = max(pos['mae'], adverse)
-                pos['mfe'] = max(pos['mfe'], favorable)
-
-                # v10.0/v2.0: Partial close with regime-adaptive ratio
+                # v2.0: Partial close at 50% of TP distance
                 if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
-                    partial_tp_ratio = exit_params['partial_tp_ratio']
-                    if profit_price >= pos["tp_dist"] * partial_tp_ratio:
+                    if profit_price >= pos["tp_dist"] * cfg.PARTIAL_TP_RATIO:
                         closed_lot = pos["original_lot"] * cfg.PARTIAL_CLOSE_RATIO
                         remaining_lot = pos["lot"] - closed_lot
                         if remaining_lot < cfg.MIN_LOT:
@@ -2490,8 +1730,14 @@ class GoldBacktester:
                             closed_lot = pos["lot"] - remaining_lot
 
                         if closed_lot > 0:
-                            pnl_pts_partial = profit_pts
+                            # v10.1: Apply exit spread to partial close (SELL buys at Ask)
+                            partial_exit = close + half_spread  # half_spread=0 if not realistic
+                            partial_profit = pos["entry"] - partial_exit
+                            pnl_pts_partial = partial_profit / pt
                             pnl_usd = pnl_pts_partial * pt * cfg.CONTRACT_SIZE * closed_lot
+                            # v10.0: Commission on partial close (proportional)
+                            if commission_per_lot > 0:
+                                pnl_usd -= commission_per_lot * closed_lot * 0.5
                             pnl_jpy = pnl_usd * 150.0
                             self.balance += pnl_jpy
                             self.peak_balance = max(self.peak_balance, self.balance)
@@ -2501,7 +1747,7 @@ class GoldBacktester:
                                 "close_time": time,
                                 "direction": pos["direction"],
                                 "entry": round(pos["entry"], 2),
-                                "exit": round(close, 2),
+                                "exit": round(partial_exit, 2),
                                 "lot": closed_lot,
                                 "pnl_pts": round(pnl_pts_partial, 1),
                                 "pnl_usd": round(pnl_usd, 2),
@@ -2519,90 +1765,91 @@ class GoldBacktester:
                         pos["partial_done"] = True
                         pos["breakeven_done"] = True
 
-                # v10.0/v2.0: Breakeven with regime-adaptive threshold
-                be_multi = exit_params['be_atr_multi']
-                if not pos["breakeven_done"] and profit_price >= atr_entry * be_multi:
+                # v2.0: Breakeven
+                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     pos["sl"] = pos["entry"] - 10 * pt
                     pos["breakeven_done"] = True
 
-                # v10.0/v2.0: Trailing with regime-adaptive step
-                trail_multi = exit_params['trail_atr_multi']
-                be_price = atr_entry * be_multi
+                # v2.0: Trailing
+                be_price = atr_entry * cfg.BE_ATR_MULTI
                 if profit_price >= be_price * 1.5:
-                    trail_step = atr_entry * trail_multi
+                    trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
                     ns = close + trail_step
                     if ns < pos["sl"] - 5 * pt or pos["sl"] == 0:
                         pos["sl"] = ns
 
-                # v10.0/v6.0: ATR ratchet trail with regime-adaptive step
-                if cfg.USE_ATR_RATCHET_TRAIL and profit_price > 0:
-                    atr_multiples = profit_price / atr_entry
-                    ratchet_base = exit_params['ratchet_step']
-                    if atr_multiples >= 2.0:
-                        ratchet_step = atr_entry * max(0.3, ratchet_base * (1.0 / atr_multiples * 2))
-                        ratchet_sl = close + ratchet_step
-                        if ratchet_sl < pos["sl"] - 5 * pt:
-                            pos["sl"] = ratchet_sl
-
                 # v3.0: Chandelier Exit for SELL
-                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * be_multi:
+                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     lowest_low = m15_df["Low"].iloc[start_idx:bar_idx + 1].min()
                     chandelier_sl = lowest_low + atr_entry * cfg.CHANDELIER_ATR_MULTI
                     if chandelier_sl < pos["sl"] - 5 * pt:
                         pos["sl"] = chandelier_sl
 
-                # v6.0: Time-decay SL tightening for SELL
-                if cfg.USE_TIME_DECAY_SL and not pos["breakeven_done"]:
-                    bars_open = bar_idx - pos.get("entry_bar", bar_idx)
-                    if bars_open >= cfg.TIME_DECAY_START_BARS:
-                        decay_periods = (bars_open - cfg.TIME_DECAY_START_BARS) / cfg.TIME_DECAY_START_BARS
-                        decay_factor = cfg.TIME_DECAY_RATE ** decay_periods
-                        original_sl_dist = pos["sl_points"] * pt
-                        decayed_sl_dist = max(cfg.MIN_SL_POINTS * pt, original_sl_dist * decay_factor)
-                        new_sl = pos["entry"] + decayed_sl_dist
-                        if new_sl < pos["sl"]:
-                            pos["sl"] = new_sl
-
-    def _close_position(self, pos, exit_price, time, reason, bar_idx=0):
+    def _close_position(self, pos, exit_price, time, reason, bar_idx=0,
+                         bar_spread_points=None):
         cfg = self.cfg
         pt = cfg.POINT
+        _realistic = getattr(cfg, 'USE_REALISTIC_SPREAD', False)
 
-        # Cooldown after SL (v9.0: regime-adaptive cooldown)
-        if reason == "SL" and bar_idx > 0:
-            self.consecutive_sl_count += 1
-            # v9.0: Use regime-specific cooldown
-            if cfg.USE_REGIME_ADAPTIVE:
-                profile = self.get_regime_profile(self.current_regime)
-                cooldown_bars = profile['cooldown_bars'] if profile else cfg.COOLDOWN_BARS
+        # v10.1: Realistic execution model for exits
+        actual_exit = exit_price
+        if _realistic:
+            _sl_slip_pts = getattr(cfg, 'SLIPPAGE_POINTS', 0)
+
+            if reason == "SL":
+                # SL is a stop order -> slips by SLIPPAGE_POINTS (worsens exit)
+                sl_slippage = _sl_slip_pts * pt
+                if pos["direction"] == "BUY":
+                    actual_exit = exit_price - sl_slippage  # BUY SL fills lower
+                else:
+                    actual_exit = exit_price + sl_slippage  # SELL SL fills higher
+
+            elif reason == "TP":
+                # TP is a limit order -> no slippage, fills at exact price
+                actual_exit = exit_price
+
             else:
-                cooldown_bars = cfg.COOLDOWN_BARS
-            if cfg.CONSEC_LOSS_ESCALATION and self.consecutive_sl_count >= cfg.CONSEC_LOSS_THRESHOLD:
-                escalation = cfg.CONSEC_LOSS_COOLDOWN_MULTI ** (
-                    self.consecutive_sl_count - cfg.CONSEC_LOSS_THRESHOLD + 1)
-                cooldown_bars = int(cooldown_bars * min(escalation, cfg.CONSEC_LOSS_MAX_MULTI))
-            self.cooldown_until = bar_idx + cooldown_bars
-        elif reason in ("TP", "Partial", "Trail"):
-            self.consecutive_sl_count = 0
+                # Market close (Stale, Weekend, EndOfPeriod, TimeExit, BB_Mid_TP, etc.)
+                # Exit at market: BUY sells at Bid, SELL buys at Ask
+                if bar_spread_points is not None:
+                    half_spread = bar_spread_points * pt * 0.5
+                else:
+                    half_spread = 0
+                if pos["direction"] == "BUY":
+                    actual_exit = exit_price - half_spread  # BUY exits at Bid
+                else:
+                    actual_exit = exit_price + half_spread  # SELL exits at Ask
 
-        # v6.0: Exit slippage (against you)
-        slippage = cfg.SLIPPAGE_POINTS * pt
-        if reason == "SL":
-            adj_exit = exit_price - slippage if pos["direction"] == "BUY" else exit_price + slippage
-        else:
-            adj_exit = exit_price - slippage if pos["direction"] == "BUY" else exit_price + slippage
-        # For TP, slippage is favorable but we model worst-case
-        adj_exit = exit_price  # SL/TP prices are already set, slippage applied at entry
-
-        pnl_pts = ((exit_price - pos["entry"]) if pos["direction"] == "BUY"
-                    else (pos["entry"] - exit_price)) / pt
+        pnl_pts = ((actual_exit - pos["entry"]) if pos["direction"] == "BUY"
+                    else (pos["entry"] - actual_exit)) / pt
         # PnL in USD: points * $0.01 * 100oz * lot
         pnl_usd = pnl_pts * pt * cfg.CONTRACT_SIZE * pos["lot"]
-        # v6.0: Commission
-        commission_usd = cfg.COMMISSION_PER_LOT * pos["lot"]
-        pnl_usd -= commission_usd
+
+        # v10.0: Deduct commission (round-trip per lot)
+        commission_per_lot = getattr(cfg, 'COMMISSION_PER_LOT', 0)
+        if commission_per_lot > 0:
+            commission_usd = commission_per_lot * pos["lot"]
+            pnl_usd -= commission_usd
+
         # JPY conversion
         pnl_jpy = pnl_usd * 150.0
+
+        # v8.0g: Track consecutive losses for streak cooldown
+        if pnl_jpy > 0:
+            self.consecutive_losses = 0
+        elif pnl_jpy <= 0 and reason in ("SL", "Stale", "Weekend", "EndOfPeriod"):
+            self.consecutive_losses += 1
+
+        # Cooldown after SL (with optional streak extension)
+        if reason == "SL" and bar_idx > 0:
+            base_cooldown = cfg.COOLDOWN_BARS
+            if getattr(cfg, 'USE_LOSING_STREAK_COOLDOWN', False):
+                _streak_thresh = getattr(cfg, 'STREAK_THRESHOLD', 3)
+                _streak_extra = getattr(cfg, 'STREAK_EXTRA_COOLDOWN', 16)
+                if self.consecutive_losses >= _streak_thresh:
+                    base_cooldown += _streak_extra
+            self.cooldown_until = bar_idx + base_cooldown
 
         self.balance += pnl_jpy
         self.peak_balance = max(self.peak_balance, self.balance)
@@ -2623,30 +1870,13 @@ class GoldBacktester:
                     self.component_stats[comp_idx]["total"] += 1
                     if is_win:
                         self.component_stats[comp_idx]["wins"] += 1
-                    # v10.0: Track component effectiveness (direction-match, pnl)
-                    if self.cfg.USE_V10_ENGINE and self.cfg.USE_COMPONENT_EFFECTIVENESS:
-                        self.component_trades[comp_idx].append((val, pnl_jpy))
-                        # Trim to 2x lookback to avoid unbounded growth
-                        max_len = self.cfg.COMP_EFF_LOOKBACK * 2
-                        if len(self.component_trades[comp_idx]) > max_len:
-                            self.component_trades[comp_idx] = self.component_trades[comp_idx][-self.cfg.COMP_EFF_LOOKBACK:]
-
-        # v10.0: Track per-regime PnL for regime performance memory
-        if self.cfg.USE_V10_ENGINE and self.cfg.USE_REGIME_MEMORY:
-            pos_regime = pos.get("regime", "trend")
-            if pos_regime in self.regime_trade_pnls:
-                self.regime_trade_pnls[pos_regime].append(pnl_jpy)
-                # Trim to 2x lookback
-                max_len = self.cfg.REGIME_MEMORY_LOOKBACK * 2
-                if len(self.regime_trade_pnls[pos_regime]) > max_len:
-                    self.regime_trade_pnls[pos_regime] = self.regime_trade_pnls[pos_regime][-self.cfg.REGIME_MEMORY_LOOKBACK:]
 
         self.trades.append({
             "open_time": pos["open_time"],
             "close_time": time,
             "direction": pos["direction"],
             "entry": round(pos["entry"], 2),
-            "exit": round(exit_price, 2),
+            "exit": round(actual_exit, 2),
             "lot": pos["lot"],
             "pnl_pts": round(pnl_pts, 1),
             "pnl_usd": round(pnl_usd, 2),
@@ -2656,24 +1886,7 @@ class GoldBacktester:
             "score": pos["score"],
             "entry_type": pos.get("entry_type", "normal"),
             "momentum_burst": pos.get("momentum_burst", False),
-            "mae": round(pos.get('mae', 0), 2),
-            "mfe": round(pos.get('mfe', 0), 2),
         })
-
-        # v13.0: Update trade quality tracker
-        if self.cfg.USE_TRADE_QUALITY:
-            sl_dist = pos.get('sl_points', 0) * self.cfg.POINT
-            tp_dist = pos.get('tp_dist', 0)
-            if sl_dist > 0:
-                self.tq_mae_ratios.append(pos.get('mae', 0) / sl_dist)
-            if tp_dist > 0:
-                self.tq_mfe_ratios.append(pos.get('mfe', 0) / tp_dist)
-            # Keep only lookback window
-            if len(self.tq_mae_ratios) > self.cfg.TQ_LOOKBACK:
-                self.tq_mae_ratios.pop(0)
-            if len(self.tq_mfe_ratios) > self.cfg.TQ_LOOKBACK:
-                self.tq_mfe_ratios.pop(0)
-
         self.open_positions.remove(pos)
 
     def _unrealized_pnl(self, price):
@@ -2781,16 +1994,6 @@ class GoldBacktester:
                 max_consec_wins = max(max_consec_wins, current_streak)
                 max_consec_losses = min(max_consec_losses, current_streak)
 
-        # v7.0: Directional breakdown
-        buys = df[df["direction"] == "BUY"]
-        sells = df[df["direction"] == "SELL"]
-        buy_wins = buys[buys["pnl_pts"] > 0]
-        sell_wins = sells[sells["pnl_pts"] > 0]
-        buy_wr = len(buy_wins) / len(buys) * 100 if len(buys) > 0 else 0
-        sell_wr = len(sell_wins) / len(sells) * 100 if len(sells) > 0 else 0
-        buy_pnl = buys["pnl_jpy"].sum() if len(buys) > 0 else 0
-        sell_pnl = sells["pnl_jpy"].sum() if len(sells) > 0 else 0
-
         return {
             "Period": f"{df['open_time'].iloc[0]} ~ {df['close_time'].iloc[-1]}",
             "Initial Balance": f"{self.cfg.INITIAL_BALANCE:,.0f} JPY",
@@ -2799,8 +2002,6 @@ class GoldBacktester:
             "Return": f"{(self.balance / self.cfg.INITIAL_BALANCE - 1) * 100:+.1f}%",
             "Trades": len(df),
             "Win Rate": f"{win_rate:.1f}% ({len(wins)}W/{len(losses)}L)",
-            "BUY": f"{len(buys)}trades WR={buy_wr:.1f}% PnL={buy_pnl:+,.0f}JPY",
-            "SELL": f"{len(sells)}trades WR={sell_wr:.1f}% PnL={sell_pnl:+,.0f}JPY",
             "Avg Win": f"{avg_win_pts:.0f}pt ({avg_win_jpy:+,.0f} JPY)",
             "Avg Loss": f"{avg_loss_pts:.0f}pt ({avg_loss_jpy:,.0f} JPY)",
             "RR Ratio": f"1:{avg_win_pts/avg_loss_pts:.2f}" if avg_loss_pts > 0 else "N/A",
@@ -2816,571 +2017,6 @@ class GoldBacktester:
             "Monthly": monthly.to_dict(),
             "ByReason": reason_stats.to_dict(),
         }
-
-
-# ============================================================
-# v6.0: Walk-Forward Validation
-# ============================================================
-class WalkForwardValidator:
-    """Rolling window walk-forward analysis for out-of-sample validation."""
-
-    def __init__(self, cfg=None):
-        self.cfg = cfg or GoldConfig()
-        self.results = []
-
-    def run(self, h4_df, h1_df, m15_df, usdjpy_df=None):
-        cfg = self.cfg
-        start_date = m15_df.index[0]
-        end_date = m15_df.index[-1]
-        total_days = (end_date - start_date).days
-
-        train_days = cfg.WF_TRAIN_MONTHS * 30
-        test_days = cfg.WF_TEST_MONTHS * 30
-        step_days = cfg.WF_STEP_MONTHS * 30
-
-        window_start = start_date
-        fold = 0
-
-        print(f"\n{'='*60}")
-        print(f" Walk-Forward Validation (Train={cfg.WF_TRAIN_MONTHS}m / Test={cfg.WF_TEST_MONTHS}m / Step={cfg.WF_STEP_MONTHS}m)")
-        print(f"{'='*60}")
-
-        while True:
-            train_end = window_start + pd.Timedelta(days=train_days)
-            test_start = train_end
-            test_end = test_start + pd.Timedelta(days=test_days)
-
-            if test_end > end_date:
-                break
-
-            fold += 1
-
-            # Train period backtest
-            m15_train = m15_df[(m15_df.index >= window_start) & (m15_df.index < train_end)]
-            h1_train = h1_df[(h1_df.index >= window_start - pd.Timedelta(days=30)) & (h1_df.index < train_end)]
-            h4_train = h4_df[(h4_df.index >= window_start - pd.Timedelta(days=60)) & (h4_df.index < train_end)]
-
-            if len(m15_train) < 500:
-                window_start += pd.Timedelta(days=step_days)
-                continue
-
-            bt_train = GoldBacktester(cfg)
-            usdjpy_train = usdjpy_df if usdjpy_df is not None else None
-            bt_train.run(h4_train, h1_train, m15_train, usdjpy_df=usdjpy_train)
-            train_rpt = bt_train.get_report()
-
-            # OOS period backtest
-            m15_test = m15_df[(m15_df.index >= test_start) & (m15_df.index < test_end)]
-            h1_test = h1_df[(h1_df.index >= test_start - pd.Timedelta(days=30)) & (h1_df.index < test_end)]
-            h4_test = h4_df[(h4_df.index >= test_start - pd.Timedelta(days=60)) & (h4_df.index < test_end)]
-
-            if len(m15_test) < 200:
-                window_start += pd.Timedelta(days=step_days)
-                continue
-
-            bt_test = GoldBacktester(cfg)
-            bt_test.run(h4_test, h1_test, m15_test, usdjpy_df=usdjpy_train)
-            test_rpt = bt_test.get_report()
-
-            if train_rpt and "error" not in train_rpt and test_rpt and "error" not in test_rpt:
-                train_pf = float(train_rpt.get("PF", "0").replace("INF", "99"))
-                test_pf = float(test_rpt.get("PF", "0").replace("INF", "99"))
-                train_ret = float(train_rpt.get("Return", "0").replace("%", "").replace("+", ""))
-                test_ret = float(test_rpt.get("Return", "0").replace("%", "").replace("+", ""))
-                train_trades = train_rpt.get("Trades", 0)
-                test_trades = test_rpt.get("Trades", 0)
-
-                result = {
-                    "fold": fold,
-                    "train_period": f"{window_start.date()} ~ {train_end.date()}",
-                    "test_period": f"{test_start.date()} ~ {test_end.date()}",
-                    "train_pf": train_pf,
-                    "test_pf": test_pf,
-                    "train_return": train_ret,
-                    "test_return": test_ret,
-                    "train_trades": train_trades,
-                    "test_trades": test_trades,
-                    "pf_ratio": test_pf / train_pf if train_pf > 0 else 0,
-                }
-                self.results.append(result)
-
-                status = "PASS" if test_pf > 1.0 and test_ret > 0 else "FAIL"
-                print(f"  Fold {fold}: Train PF={train_pf:.2f} Ret={train_ret:+.1f}% | "
-                      f"OOS PF={test_pf:.2f} Ret={test_ret:+.1f}% [{status}]")
-
-            window_start += pd.Timedelta(days=step_days)
-
-        self._print_summary()
-        return self.results
-
-    def _print_summary(self):
-        if not self.results:
-            print("  [WARN] No walk-forward folds completed")
-            return
-
-        print(f"\n  --- Walk-Forward Summary ---")
-        oos_pfs = [r["test_pf"] for r in self.results]
-        oos_rets = [r["test_return"] for r in self.results]
-        pf_ratios = [r["pf_ratio"] for r in self.results]
-        pass_count = sum(1 for r in self.results if r["test_pf"] > 1.0 and r["test_return"] > 0)
-
-        print(f"  Folds: {len(self.results)}")
-        print(f"  OOS Pass Rate: {pass_count}/{len(self.results)} ({pass_count/len(self.results)*100:.0f}%)")
-        print(f"  OOS PF: avg={np.mean(oos_pfs):.2f} min={np.min(oos_pfs):.2f} max={np.max(oos_pfs):.2f}")
-        print(f"  OOS Return: avg={np.mean(oos_rets):+.1f}% min={np.min(oos_rets):+.1f}% max={np.max(oos_rets):+.1f}%")
-        print(f"  PF Decay (OOS/Train): avg={np.mean(pf_ratios):.2f}")
-
-        # Robustness score: >70% pass rate + avg PF decay > 0.6 = robust
-        robustness = pass_count / len(self.results) * 100
-        if robustness >= 70 and np.mean(pf_ratios) >= 0.6:
-            print(f"  Robustness: STRONG ({robustness:.0f}%)")
-        elif robustness >= 50:
-            print(f"  Robustness: MODERATE ({robustness:.0f}%)")
-        else:
-            print(f"  Robustness: WEAK ({robustness:.0f}%)")
-
-
-# ============================================================
-# v6.0: Monte Carlo Simulation
-# ============================================================
-class MonteCarloSimulator:
-    """Trade-shuffling Monte Carlo for confidence intervals."""
-
-    def __init__(self, trades, initial_balance=300_000, n_sims=1000, confidence=0.95):
-        self.trades = trades
-        self.initial_balance = initial_balance
-        self.n_sims = n_sims
-        self.confidence = confidence
-        self.results = {}
-
-    def run(self):
-        if not self.trades:
-            print("  [WARN] No trades for Monte Carlo")
-            return self.results
-
-        pnls = [t["pnl_jpy"] for t in self.trades]
-        n_trades = len(pnls)
-
-        print(f"\n{'='*60}")
-        print(f" Monte Carlo Simulation ({self.n_sims:,} runs, {n_trades} trades)")
-        print(f"{'='*60}")
-
-        final_balances = []
-        max_dds = []
-        max_dd_jpys = []
-
-        rng = np.random.default_rng(42)
-
-        for _ in range(self.n_sims):
-            shuffled = rng.permutation(pnls)
-            balance = self.initial_balance
-            peak = balance
-            max_dd_pct = 0
-            max_dd_jpy = 0
-
-            for pnl in shuffled:
-                balance += pnl
-                if balance > peak:
-                    peak = balance
-                dd_pct = (peak - balance) / peak * 100 if peak > 0 else 0
-                dd_jpy = peak - balance
-                max_dd_pct = max(max_dd_pct, dd_pct)
-                max_dd_jpy = max(max_dd_jpy, dd_jpy)
-
-            final_balances.append(balance)
-            max_dds.append(max_dd_pct)
-            max_dd_jpys.append(max_dd_jpy)
-
-        final_balances = np.array(final_balances)
-        max_dds = np.array(max_dds)
-        max_dd_jpys = np.array(max_dd_jpys)
-
-        lo = (1 - self.confidence) / 2
-        hi = 1 - lo
-
-        self.results = {
-            "median_balance": np.median(final_balances),
-            "mean_balance": np.mean(final_balances),
-            "ci_low_balance": np.percentile(final_balances, lo * 100),
-            "ci_high_balance": np.percentile(final_balances, hi * 100),
-            "worst_balance": np.min(final_balances),
-            "best_balance": np.max(final_balances),
-            "median_dd": np.median(max_dds),
-            "ci95_dd": np.percentile(max_dds, 95),
-            "worst_dd": np.max(max_dds),
-            "ci95_dd_jpy": np.percentile(max_dd_jpys, 95),
-            "prob_profit": np.mean(final_balances > self.initial_balance) * 100,
-            "prob_double": np.mean(final_balances > self.initial_balance * 2) * 100,
-            "prob_ruin_50pct": np.mean(max_dds > 50) * 100,
-        }
-
-        print(f"  Final Balance:")
-        print(f"    Median: {self.results['median_balance']:,.0f} JPY")
-        print(f"    95% CI: [{self.results['ci_low_balance']:,.0f} ~ {self.results['ci_high_balance']:,.0f}] JPY")
-        print(f"    Worst:  {self.results['worst_balance']:,.0f} JPY")
-        print(f"  Max Drawdown:")
-        print(f"    Median: {self.results['median_dd']:.1f}%")
-        print(f"    95th pctl: {self.results['ci95_dd']:.1f}% ({self.results['ci95_dd_jpy']:,.0f} JPY)")
-        print(f"    Worst:  {self.results['worst_dd']:.1f}%")
-        print(f"  Probabilities:")
-        print(f"    Profit: {self.results['prob_profit']:.1f}%")
-        print(f"    2x Return: {self.results['prob_double']:.1f}%")
-        print(f"    Ruin (>50% DD): {self.results['prob_ruin_50pct']:.1f}%")
-
-        return self.results
-
-
-# ============================================================
-# v12.0: Statistical Significance Analyzer
-# ============================================================
-class StatisticalSignificanceAnalyzer:
-    """Bootstrap-based statistical significance testing for trading edge.
-
-    Provides:
-    - Bootstrap 95% CI for Profit Factor and Sharpe Ratio
-    - p-value for PF > 1.0 (null hypothesis: no edge)
-    - p-value for Sharpe > 0 (null hypothesis: random returns)
-    - Maximum Drawdown distribution from Monte Carlo
-    - Institutional-grade significance verdict
-    """
-
-    def __init__(self, trades, initial_balance=300_000, n_bootstrap=10000, n_mc=1000,
-                 confidence=0.95, seed=42):
-        self.trades = trades
-        self.initial_balance = initial_balance
-        self.n_bootstrap = n_bootstrap
-        self.n_mc = n_mc
-        self.confidence = confidence
-        self.rng = np.random.default_rng(seed)
-        self.results = {}
-
-    def _calc_pf(self, pnls):
-        """Calculate Profit Factor from PnL array."""
-        wins = pnls[pnls > 0].sum()
-        losses = abs(pnls[pnls <= 0].sum())
-        if losses == 0:
-            return float("inf") if wins > 0 else 1.0
-        return wins / losses
-
-    def _calc_sharpe(self, pnls):
-        """Calculate Sharpe ratio (annualized for M15 bars)."""
-        if len(pnls) < 2 or np.std(pnls) == 0:
-            return 0.0
-        return np.mean(pnls) / np.std(pnls) * np.sqrt(252 * 4)
-
-    def _bootstrap_ci(self, pnls, stat_func, null_center=None):
-        """Bootstrap confidence interval and p-value.
-
-        Args:
-            pnls: array of trade PnLs
-            stat_func: function to compute statistic
-            null_center: if set, compute p-value for stat > null_center
-        Returns:
-            (ci_low, ci_high, point_estimate, p_value)
-        """
-        n = len(pnls)
-        boot_stats = np.empty(self.n_bootstrap)
-
-        for i in range(self.n_bootstrap):
-            sample = self.rng.choice(pnls, size=n, replace=True)
-            boot_stats[i] = stat_func(sample)
-
-        # Filter out inf values for percentile calculation
-        finite_mask = np.isfinite(boot_stats)
-        finite_stats = boot_stats[finite_mask]
-
-        alpha = 1 - self.confidence
-        if len(finite_stats) > 0:
-            ci_low = np.percentile(finite_stats, alpha / 2 * 100)
-            ci_high = np.percentile(finite_stats, (1 - alpha / 2) * 100)
-        else:
-            ci_low = ci_high = float("inf")
-
-        point_est = stat_func(pnls)
-
-        p_value = None
-        if null_center is not None and len(finite_stats) > 0:
-            # One-sided p-value: proportion of bootstrap samples <= null_center
-            p_value = np.mean(boot_stats <= null_center)
-
-        return ci_low, ci_high, point_est, p_value
-
-    def _mc_drawdown_distribution(self, pnls):
-        """Monte Carlo drawdown distribution via trade-order shuffling."""
-        max_dds = np.empty(self.n_mc)
-
-        for i in range(self.n_mc):
-            shuffled = self.rng.permutation(pnls)
-            balance = self.initial_balance
-            peak = balance
-            max_dd_pct = 0.0
-
-            for pnl in shuffled:
-                balance += pnl
-                if balance > peak:
-                    peak = balance
-                if peak > 0:
-                    dd = (peak - balance) / peak * 100
-                    if dd > max_dd_pct:
-                        max_dd_pct = dd
-
-            max_dds[i] = max_dd_pct
-
-        return max_dds
-
-    @staticmethod
-    def _normal_cdf(x):
-        """Approximation of standard normal CDF (Abramowitz & Stegun)."""
-        import math
-        if x < -8:
-            return 0.0
-        if x > 8:
-            return 1.0
-        # Use error function if available
-        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-    def _t_test_mean_positive(self, pnls):
-        """One-sample t-test: H0: mean(PnL) <= 0, H1: mean(PnL) > 0.
-        Uses normal approximation for large n (valid for n > 30)."""
-        n = len(pnls)
-        if n < 2:
-            return 0.0, 1.0
-        mean = np.mean(pnls)
-        se = np.std(pnls, ddof=1) / np.sqrt(n)
-        if se == 0:
-            return mean, 0.0 if mean > 0 else 1.0
-        t_stat = mean / se
-        # For n > 30, t-distribution ≈ normal distribution
-        p_value = 1.0 - self._normal_cdf(t_stat)
-        return t_stat, p_value
-
-    @staticmethod
-    def _binomial_pvalue(k, n, p=0.5):
-        """One-sided binomial test p-value: P(X >= k) under H0: p=0.5.
-        Uses normal approximation for large n (valid for np > 5)."""
-        import math
-        mu = n * p
-        sigma = math.sqrt(n * p * (1 - p))
-        if sigma == 0:
-            return 0.0 if k > mu else 1.0
-        # Continuity-corrected z-score
-        z = (k - 0.5 - mu) / sigma
-        return 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-    def run(self):
-        """Run full statistical significance analysis."""
-        if not self.trades:
-            print("  [WARN] No trades for statistical analysis")
-            return self.results
-
-        pnls = np.array([t["pnl_jpy"] for t in self.trades])
-        n_trades = len(pnls)
-
-        print(f"\n{'='*60}")
-        print(f" Statistical Significance Analysis")
-        print(f" ({n_trades} trades, {self.n_bootstrap:,} bootstrap, {self.n_mc:,} MC)")
-        print(f"{'='*60}")
-
-        # 1. Bootstrap CI for Profit Factor
-        pf_lo, pf_hi, pf_point, pf_pval = self._bootstrap_ci(
-            pnls, self._calc_pf, null_center=1.0
-        )
-        print(f"\n  [1] Profit Factor")
-        print(f"      Point estimate:  {pf_point:.3f}")
-        print(f"      95% CI:          [{pf_lo:.3f}, {pf_hi:.3f}]")
-        if pf_pval is not None:
-            sig = "***" if pf_pval < 0.001 else "**" if pf_pval < 0.01 else "*" if pf_pval < 0.05 else "n.s."
-            print(f"      p-value (PF>1):  {pf_pval:.4f} {sig}")
-            if pf_lo > 1.0:
-                print(f"      -> SIGNIFICANT: Entire 95% CI above 1.0 (trading edge confirmed)")
-            elif pf_pval < 0.05:
-                print(f"      -> SIGNIFICANT at 5% level (edge likely exists)")
-            else:
-                print(f"      -> NOT significant: Cannot reject null hypothesis of no edge")
-
-        # 2. Bootstrap CI for Sharpe Ratio
-        sharpe_lo, sharpe_hi, sharpe_point, sharpe_pval = self._bootstrap_ci(
-            pnls, self._calc_sharpe, null_center=0.0
-        )
-        print(f"\n  [2] Sharpe Ratio (annualized)")
-        print(f"      Point estimate:  {sharpe_point:.3f}")
-        print(f"      95% CI:          [{sharpe_lo:.3f}, {sharpe_hi:.3f}]")
-        if sharpe_pval is not None:
-            sig = "***" if sharpe_pval < 0.001 else "**" if sharpe_pval < 0.01 else "*" if sharpe_pval < 0.05 else "n.s."
-            print(f"      p-value (S>0):   {sharpe_pval:.4f} {sig}")
-            if sharpe_lo > 0:
-                print(f"      -> SIGNIFICANT: Entire 95% CI above 0 (risk-adjusted edge confirmed)")
-
-        # 3. t-test for mean PnL > 0
-        t_stat, t_pval = self._t_test_mean_positive(pnls)
-        mean_pnl = np.mean(pnls)
-        se_pnl = np.std(pnls, ddof=1) / np.sqrt(n_trades)
-        print(f"\n  [3] Mean Trade PnL (t-test)")
-        print(f"      Mean PnL:        {mean_pnl:+,.1f} JPY/trade")
-        print(f"      Std Error:       {se_pnl:,.1f} JPY")
-        print(f"      t-statistic:     {t_stat:.3f}")
-        sig = "***" if t_pval < 0.001 else "**" if t_pval < 0.01 else "*" if t_pval < 0.05 else "n.s."
-        print(f"      p-value (>0):    {t_pval:.6f} {sig}")
-        if t_pval < 0.01:
-            print(f"      -> HIGHLY SIGNIFICANT: Mean PnL is statistically positive")
-        elif t_pval < 0.05:
-            print(f"      -> SIGNIFICANT at 5% level")
-        else:
-            print(f"      -> NOT significant: Mean PnL not reliably positive")
-
-        # 4. Monte Carlo Drawdown Distribution
-        print(f"\n  [4] Maximum Drawdown Distribution (MC {self.n_mc:,} sims)")
-        mc_dds = self._mc_drawdown_distribution(pnls)
-        dd_median = np.median(mc_dds)
-        dd_p50 = np.percentile(mc_dds, 50)
-        dd_p75 = np.percentile(mc_dds, 75)
-        dd_p90 = np.percentile(mc_dds, 90)
-        dd_p95 = np.percentile(mc_dds, 95)
-        dd_p99 = np.percentile(mc_dds, 99)
-        dd_worst = np.max(mc_dds)
-        print(f"      50th percentile: {dd_p50:.1f}%")
-        print(f"      75th percentile: {dd_p75:.1f}%")
-        print(f"      90th percentile: {dd_p90:.1f}%")
-        print(f"      95th percentile: {dd_p95:.1f}%")
-        print(f"      99th percentile: {dd_p99:.1f}%")
-        print(f"      Worst case:      {dd_worst:.1f}%")
-        if dd_p99 < 30:
-            print(f"      -> LOW RISK: 99th percentile DD < 30%")
-        elif dd_p99 < 50:
-            print(f"      -> MODERATE RISK: 99th percentile DD < 50%")
-        else:
-            print(f"      -> HIGH RISK: 99th percentile DD >= 50%")
-
-        # 5. Win Rate significance (binomial test)
-        n_wins = sum(1 for t in self.trades if t["pnl_jpy"] > 0)
-        binom_pval = self._binomial_pvalue(n_wins, n_trades, 0.5)
-        wr = n_wins / n_trades * 100
-        print(f"\n  [5] Win Rate Significance (binomial test)")
-        print(f"      Win Rate:        {wr:.1f}% ({n_wins}/{n_trades})")
-        sig = "***" if binom_pval < 0.001 else "**" if binom_pval < 0.01 else "*" if binom_pval < 0.05 else "n.s."
-        print(f"      p-value (>50%):  {binom_pval:.6f} {sig}")
-        if binom_pval < 0.01:
-            print(f"      -> HIGHLY SIGNIFICANT: Win rate is not random")
-
-        # 6. Summary Verdict
-        print(f"\n  {'='*56}")
-        print(f"  STATISTICAL SIGNIFICANCE VERDICT")
-        print(f"  {'='*56}")
-
-        sig_score = 0
-        max_sig = 5
-        verdicts = []
-
-        if pf_pval is not None and pf_pval < 0.05:
-            sig_score += 1
-            verdicts.append("PF > 1.0")
-        if pf_lo > 1.0:
-            sig_score += 1
-            verdicts.append("PF 95%CI > 1.0")
-        if sharpe_pval is not None and sharpe_pval < 0.05:
-            sig_score += 1
-            verdicts.append("Sharpe > 0")
-        if t_pval < 0.05:
-            sig_score += 1
-            verdicts.append("Mean PnL > 0")
-        if dd_p99 < 30:
-            sig_score += 1
-            verdicts.append("DD99 < 30%")
-
-        for v in verdicts:
-            print(f"    [PASS] {v}")
-        for v_name in ["PF > 1.0", "PF 95%CI > 1.0", "Sharpe > 0", "Mean PnL > 0", "DD99 < 30%"]:
-            if v_name not in verdicts:
-                print(f"    [FAIL] {v_name}")
-
-        print(f"\n    Score: {sig_score}/{max_sig}")
-        if sig_score >= 5:
-            level = "INSTITUTIONAL GRADE - All significance tests passed"
-        elif sig_score >= 4:
-            level = "PROFESSIONAL GRADE - Strong statistical evidence"
-        elif sig_score >= 3:
-            level = "SEMI-PROFESSIONAL - Moderate statistical evidence"
-        else:
-            level = "INSUFFICIENT - Weak or no statistical evidence of edge"
-        print(f"    Verdict: {level}")
-
-        # Store results
-        self.results = {
-            "pf_point": pf_point,
-            "pf_ci_low": pf_lo,
-            "pf_ci_high": pf_hi,
-            "pf_pvalue": pf_pval,
-            "sharpe_point": sharpe_point,
-            "sharpe_ci_low": sharpe_lo,
-            "sharpe_ci_high": sharpe_hi,
-            "sharpe_pvalue": sharpe_pval,
-            "t_stat": t_stat,
-            "t_pvalue": t_pval,
-            "mean_pnl": mean_pnl,
-            "dd_percentiles": {
-                "p50": dd_p50, "p75": dd_p75, "p90": dd_p90,
-                "p95": dd_p95, "p99": dd_p99, "worst": dd_worst,
-            },
-            "win_rate_pvalue": binom_pval,
-            "sig_score": sig_score,
-            "sig_max": max_sig,
-        }
-
-        return self.results
-
-
-# ============================================================
-# v6.0: Parameter Sensitivity Analysis
-# ============================================================
-def run_sensitivity_analysis(h4_df, h1_df, m15_df, usdjpy_df=None):
-    """Test key parameter variations to check for overfitting."""
-    print(f"\n{'='*60}")
-    print(f" Parameter Sensitivity Analysis")
-    print(f"{'='*60}")
-
-    base_cfg = GoldConfig()
-    # Test variations of critical parameters (limited for speed)
-    tests = [
-        ("SL_ATR_MULTI", [1.2, 1.5, 2.0]),
-        ("TP_ATR_MULTI", [2.5, 3.5, 4.5]),
-        ("MIN_SCORE", [8, 9, 10]),
-        ("SCORE_MARGIN_MIN", [1, 2, 3]),
-    ]
-
-    results = {}
-    for param_name, values in tests:
-        param_results = []
-        for val in values:
-            cfg = GoldConfig()
-            setattr(cfg, param_name, val)
-            bt = GoldBacktester(cfg)
-            bt.run(h4_df, h1_df, m15_df, usdjpy_df=usdjpy_df)
-            rpt = bt.get_report()
-            if rpt and "error" not in rpt:
-                pf = float(rpt.get("PF", "0").replace("INF", "99"))
-                ret = float(rpt.get("Return", "0").replace("%", "").replace("+", ""))
-                dd = float(rpt.get("Max DD", "0").split("%")[0])
-                trades = rpt.get("Trades", 0)
-                param_results.append({"value": val, "pf": pf, "return": ret, "dd": dd, "trades": trades})
-
-        results[param_name] = param_results
-
-        # Print results for this parameter
-        print(f"\n  {param_name}:")
-        print(f"    {'Value':>8} {'PF':>6} {'Return':>8} {'DD':>6} {'Trades':>7}")
-        for r in param_results:
-            marker = " <--" if r["value"] == getattr(base_cfg, param_name) else ""
-            print(f"    {r['value']:>8} {r['pf']:>6.2f} {r['return']:>+7.1f}% {r['dd']:>5.1f}% {r['trades']:>7}{marker}")
-
-        # Check sensitivity: is the optimal near our chosen value?
-        pfs = [r["pf"] for r in param_results]
-        pf_range = max(pfs) - min(pfs)
-        if pf_range > 0.3:
-            print(f"    Sensitivity: HIGH (PF range={pf_range:.2f})")
-        else:
-            print(f"    Sensitivity: LOW (PF range={pf_range:.2f}) -- ROBUST")
-
-    return results
 
 
 # ============================================================
@@ -3419,7 +2055,7 @@ if __name__ == "__main__":
 
     if rpt and "error" not in rpt:
         print("\n" + "=" * 60)
-        print(" AntigravityMTF EA [GOLD] v9.0 Regime-Adaptive Backtest")
+        print(" AntigravityMTF EA [GOLD] v4.0 Backtest Results (6 months)")
         print("=" * 60)
         for k, v in rpt.items():
             if k == "Monthly":
@@ -3441,47 +2077,21 @@ if __name__ == "__main__":
         bt.analyze_components()
 
         # v4.0: Defense stats
-        print(f"\n  --- Defense Stats ---")
+        print(f"\n  --- v4.0 Defense Stats ---")
         print(f"  News filter blocks:   {bt.news_blocks}")
         print(f"  Crash regime skips:   {bt.crash_skips}")
         print(f"  Weekend closes:       {bt.weekend_closes}")
         print(f"  Spread blocks:        {bt.spread_blocks}")
-        print(f"  Spike blocks:         {bt.spike_blocks}")
         print(f"  Circuit breaker days: {sum(1 for t in bt.trades if t.get('reason') == 'CircuitBreaker')}")
 
         # v4.0: Attack stats
         reversals = sum(1 for t in bt.trades if t.get('entry_type') == 'reversal')
         pyramids = sum(1 for t in bt.trades if t.get('entry_type') == 'pyramid')
         bursts = sum(1 for t in bt.trades if t.get('momentum_burst', False))
-        mr_entries = sum(1 for t in bt.trades if t.get('entry_type') == 'mean_reversion')
-        print(f"\n  --- Attack Stats ---")
+        print(f"\n  --- v4.0 Attack Stats ---")
         print(f"  Reversal trades:      {reversals}")
         print(f"  Pyramid entries:      {pyramids}")
         print(f"  Momentum burst trades:{bursts}")
-        print(f"  Mean-reversion trades:{mr_entries}")
-
-        # v9.0: Regime Stats
-        if cfg.USE_REGIME_ADAPTIVE:
-            total_bars_counted = sum(bt.regime_stats.values())
-            print(f"\n  --- v9.0 Regime Stats ---")
-            for regime_name, count in bt.regime_stats.items():
-                pct = count / total_bars_counted * 100 if total_bars_counted > 0 else 0
-                trades_in_regime = len(bt.regime_trades.get(regime_name, []))
-                print(f"  {regime_name:>10}: {count:>6} bars ({pct:>5.1f}%) | {trades_in_regime} entries")
-
-            # Regime-specific trade performance
-            print(f"\n  --- Regime Trade Performance ---")
-            trade_df = pd.DataFrame(bt.trades)
-            if not trade_df.empty and 'entry_type' in trade_df.columns:
-                for et in ['normal', 'pyramid', 'mean_reversion', 'reversal']:
-                    subset = trade_df[trade_df['entry_type'] == et]
-                    if len(subset) > 0:
-                        et_wins = subset[subset['pnl_jpy'] > 0]
-                        et_wr = len(et_wins) / len(subset) * 100
-                        et_pnl = subset['pnl_jpy'].sum()
-                        et_pf = et_wins['pnl_jpy'].sum() / abs(subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum()) if subset[subset['pnl_jpy'] <= 0]['pnl_jpy'].sum() != 0 else float('inf')
-                        print(f"  {et:>16}: {len(subset):>4} trades | WR={et_wr:>5.1f}% | PF={et_pf:>5.2f} | PnL={et_pnl:>+10,.0f} JPY")
-
 
         # Last 10 trades
         print(f"\n  Trade Details (last 10):")
@@ -3489,123 +2099,6 @@ if __name__ == "__main__":
         print("  " + "-" * 110)
         for t in bt.trades[-10:]:
             print(f"  {str(t['open_time'])[:19]:<20} {t['direction']:<5} {t['entry']:>10.2f} {t['exit']:>10.2f} {t['lot']:>5.2f} {t['pnl_pts']:>8.0f} {t['pnl_jpy']:>+10,.0f} {t['balance']:>12,.0f} {t['reason']:<10} {t.get('entry_type','normal'):<8}")
-
-        # v6.0: Monte Carlo Simulation
-        mc = MonteCarloSimulator(bt.trades, cfg.INITIAL_BALANCE, cfg.MC_SIMULATIONS, cfg.MC_CONFIDENCE)
-        mc_results = mc.run()
-
-        # v12.0: Statistical Significance Analysis
-        ssa = StatisticalSignificanceAnalyzer(bt.trades, cfg.INITIAL_BALANCE)
-        ssa_results = ssa.run()
-
-        # v6.0: Walk-Forward Validation
-        wf = WalkForwardValidator(cfg)
-        wf_results = wf.run(h4, h1, m15, usdjpy_df=usdjpy)
-
-        # v6.0: Parameter Sensitivity Analysis (optional, slow)
-        sa_results = {}
-        if "--sensitivity" in sys.argv:
-            print("\n[SA] Running parameter sensitivity analysis...")
-            sa_results = run_sensitivity_analysis(h4, h1, m15, usdjpy_df=usdjpy)
-        else:
-            print("\n  [INFO] Sensitivity analysis skipped (use --sensitivity flag)")
-
-        # v6.0: Professional Summary
-        print(f"\n{'='*60}")
-        print(f" PROFESSIONAL GRADE ASSESSMENT")
-        print(f"{'='*60}")
-        score = 0
-        max_score = 0
-
-        # 1. Profitability (in-sample)
-        max_score += 2
-        pf_val = float(rpt.get("PF", "0").replace("INF", "99"))
-        if pf_val >= 1.3:
-            score += 2
-            print(f"  [PASS] In-sample PF={pf_val:.2f} (>= 1.3)")
-        elif pf_val >= 1.1:
-            score += 1
-            print(f"  [WARN] In-sample PF={pf_val:.2f} (marginal)")
-        else:
-            print(f"  [FAIL] In-sample PF={pf_val:.2f} (< 1.1)")
-
-        # 2. Walk-forward
-        max_score += 3
-        if wf_results:
-            oos_pass = sum(1 for r in wf_results if r["test_pf"] > 1.0 and r["test_return"] > 0)
-            oos_rate = oos_pass / len(wf_results) * 100
-            if oos_rate >= 70:
-                score += 3
-                print(f"  [PASS] Walk-forward OOS pass rate={oos_rate:.0f}% (>= 70%)")
-            elif oos_rate >= 50:
-                score += 2
-                print(f"  [WARN] Walk-forward OOS pass rate={oos_rate:.0f}% (>= 50%)")
-            else:
-                print(f"  [FAIL] Walk-forward OOS pass rate={oos_rate:.0f}% (< 50%)")
-        else:
-            print(f"  [SKIP] Walk-forward: insufficient data")
-
-        # 3. Monte Carlo
-        max_score += 2
-        if mc_results:
-            if mc_results["prob_profit"] >= 95:
-                score += 2
-                print(f"  [PASS] MC profit probability={mc_results['prob_profit']:.1f}% (>= 95%)")
-            elif mc_results["prob_profit"] >= 80:
-                score += 1
-                print(f"  [WARN] MC profit probability={mc_results['prob_profit']:.1f}% (>= 80%)")
-            else:
-                print(f"  [FAIL] MC profit probability={mc_results['prob_profit']:.1f}% (< 80%)")
-
-        # 4. Drawdown
-        max_score += 2
-        dd_val = float(rpt.get("Max DD", "0").split("%")[0])
-        if dd_val <= 15:
-            score += 2
-            print(f"  [PASS] Max DD={dd_val:.1f}% (<= 15%)")
-        elif dd_val <= 25:
-            score += 1
-            print(f"  [WARN] Max DD={dd_val:.1f}% (<= 25%)")
-        else:
-            print(f"  [FAIL] Max DD={dd_val:.1f}% (> 25%)")
-
-        # 5. Trade count (statistical significance)
-        max_score += 1
-        trades_n = rpt.get("Trades", 0)
-        if trades_n >= 300:
-            score += 1
-            print(f"  [PASS] Trade count={trades_n} (>= 300, statistically significant)")
-        else:
-            print(f"  [FAIL] Trade count={trades_n} (< 300)")
-
-        # 6. Statistical Significance (v12.0)
-        max_score += 2
-        if ssa_results:
-            sig_s = ssa_results.get("sig_score", 0)
-            sig_m = ssa_results.get("sig_max", 5)
-            pf_pv = ssa_results.get("pf_pvalue")
-            sh_pv = ssa_results.get("sharpe_pvalue")
-            if sig_s >= 4:
-                score += 2
-                print(f"  [PASS] Statistical significance={sig_s}/{sig_m} (PF p={pf_pv:.4f}, Sharpe p={sh_pv:.4f})")
-            elif sig_s >= 3:
-                score += 1
-                print(f"  [WARN] Statistical significance={sig_s}/{sig_m} (moderate evidence)")
-            else:
-                print(f"  [FAIL] Statistical significance={sig_s}/{sig_m} (weak evidence)")
-        else:
-            print(f"  [SKIP] Statistical significance: not computed")
-
-        print(f"\n  OVERALL SCORE: {score}/{max_score}")
-        if score >= max_score * 0.9:
-            print(f"  VERDICT: INSTITUTIONAL GRADE")
-        elif score >= max_score * 0.8:
-            print(f"  VERDICT: PROFESSIONAL GRADE")
-        elif score >= max_score * 0.6:
-            print(f"  VERDICT: SEMI-PROFESSIONAL (improvements needed)")
-        else:
-            print(f"  VERDICT: NEEDS WORK")
-
     else:
         print("[WARN] No trades occurred")
         print("   Try lowering MinScore or adjusting parameters")
