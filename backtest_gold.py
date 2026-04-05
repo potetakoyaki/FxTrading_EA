@@ -36,7 +36,7 @@ class GoldConfig:
     SL_ATR_MULTI = 1.2         # v6.1: tighter SL for better RR (1.5→1.2, PF 1.60→1.96)
     TP_ATR_MULTI = 4.0         # v8.1: tighter TP (5.0→4.0: WFA 12→13/14 with RTP=5.0)
     TRAIL_ATR_MULTI = 1.0
-    BE_ATR_MULTI = 0.8         # v6.1: earlier breakeven (1.5→0.8, PF +0.15, protects capital)
+    BE_ATR_MULTI = 0.5         # v9.3: 0.8→0.5 (16/16 PASS, 早期BEで利益保護)
     MIN_SL_POINTS = 200
     MAX_SL_POINTS = 1500
 
@@ -106,7 +106,7 @@ class GoldConfig:
     # v3.0: Chandelier Exit
     USE_CHANDELIER_EXIT = True
     CHANDELIER_PERIOD = 22
-    CHANDELIER_ATR_MULTI = 2.0  # v6.1: tighter chandelier exit (3.0→2.0, locks profit faster)
+    CHANDELIER_ATR_MULTI = 1.5  # v9.3: 2.0→1.5 (16/16 PASS, 利益ロック高速化)
 
     # v3.0: Equity Curve Filter
     USE_EQUITY_CURVE = True
@@ -138,7 +138,7 @@ class GoldConfig:
     USE_REVERSAL_MODE = True
 
     # v5.3: Hard Session Filter (extreme volatility block)
-    USE_HARD_SESSION_FILTER = True
+    USE_HARD_SESSION_FILTER = False  # SYNC-FIX: never applied in run() loop; disabled to match MQ5 sync
     BLOCK_FOMC_HOURS = (18, 21)       # FOMC announcement window (UTC)
     BLOCK_NFP_HOURS = (13, 15)        # NFP release window (UTC)
     BLOCK_CPI_HOURS = (13, 15)        # CPI release window (UTC)
@@ -148,10 +148,10 @@ class GoldConfig:
     # v5.4: Dead Zone Hour Filter -- block structurally unprofitable hours
     USE_DEAD_ZONE_FILTER = True
     DEAD_ZONE_ALL_HOURS = {11, 12}           # Block ALL entries (lunch dead zone)
-    DEAD_ZONE_NORMAL_HOURS = {14, 18, 21}    # Block new positions only (session transitions)
+    DEAD_ZONE_NORMAL_HOURS = {14, 18, 21}    # SYNC-FIX: applied in fast.py; matches MQ5 (block new positions at session transitions)
 
     # v5.4: Score 11 Skip -- score=11 consistently underperforms across all years
-    SKIP_SCORE_11 = True
+    SKIP_SCORE_11 = True   # SYNC-FIX: applied in fast.py; matches MQ5 (score=11→0)
 
     # v6.0: Session-Regime Adaptive Threshold (SRAT)
     # Replace fixed MIN_SCORE with per-session base thresholds.
@@ -199,7 +199,7 @@ class GoldConfig:
     # v7.0: Range-Reversion Strategy
     # Activates ONLY when H4 ADX < RANGING_ADX_THRESHOLD (ranging market detected)
     # Uses mean-reversion signals (BB bounce, RSI extreme, S/R) instead of trend-following
-    USE_RANGE_REVERSION = True
+    USE_RANGE_REVERSION = False  # SYNC-FIX: get_range_signal() never called in run(); disabled to match MQ5 sync
     RANGE_BB_ENABLED = True
     RANGE_RSI_OVERSOLD = 30
     RANGE_RSI_OVERBOUGHT = 70
@@ -253,6 +253,19 @@ class GoldConfig:
     USE_LOSING_STREAK_COOLDOWN = False
     STREAK_THRESHOLD = 3             # After N consecutive losses
     STREAK_EXTRA_COOLDOWN = 16       # Extra M15 bars of cooldown
+
+    # v9.1: Chop Filter -- detect directional whipsaw via H4 bar direction changes
+    # When H4 shows frequent direction reversals, market is choppy → raise min_score
+    USE_CHOP_FILTER = False  # Tested: hurts more than helps
+    CHOP_LOOKBACK = 8              # Look at last N H4 bars
+    CHOP_THRESHOLD = 5             # If direction changes >= threshold → choppy
+    CHOP_SCORE_BOOST = 3           # Add to dynamic_min_score when choppy
+
+    # v9.2: Adaptive Chandelier in Ranging
+    # Tighten chandelier exit when H4 ADX is low to lock profits faster
+    USE_ADAPTIVE_CHANDELIER = False  # Tested: helps some quarters, hurts 2023-Q2
+    ADAPTIVE_CHAND_ADX_THRESHOLD = 20  # When ADX below this
+    ADAPTIVE_CHAND_ATR_MULTI = 1.5     # Use this instead of CHANDELIER_ATR_MULTI(2.0)
 
     # v9.0: Range Strategy v2 -- BB Mean Reversion + Stochastic
     # Activates INSTEAD of trend-following when H4 ADX < threshold (ranging detected)
@@ -1672,12 +1685,18 @@ class GoldBacktester:
                         pos["breakeven_done"] = True
 
                 # v2.0: Breakeven at ATR * BE_ATR_MULTI
-                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                # v9.2: Adaptive BE -- tighter in ranging to protect capital
+                _be_multi = cfg.BE_ATR_MULTI
+                if getattr(cfg, 'USE_ADAPTIVE_CHANDELIER', False):
+                    _h4adx = getattr(self, '_current_h4_adx', 99)
+                    if not (_h4adx != _h4adx) and _h4adx < getattr(cfg, 'ADAPTIVE_CHAND_ADX_THRESHOLD', 20):
+                        _be_multi = min(_be_multi, 0.4)  # BE at 0.4*ATR in ranging
+                if not pos["breakeven_done"] and profit_price >= atr_entry * _be_multi:
                     pos["sl"] = pos["entry"] + 10 * pt
                     pos["breakeven_done"] = True
 
                 # v2.0: Trailing at BE * 1.5, step = ATR * TRAIL_ATR_MULTI
-                be_price = atr_entry * cfg.BE_ATR_MULTI
+                be_price = atr_entry * _be_multi
                 if profit_price >= be_price * 1.5:
                     trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
                     ns = close - trail_step
@@ -1685,10 +1704,16 @@ class GoldBacktester:
                         pos["sl"] = ns
 
                 # v3.0: Chandelier Exit for BUY
+                # v9.2: Adaptive chandelier -- tighter in ranging (ADX < threshold)
                 if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     highest_high = m15_df["High"].iloc[start_idx:bar_idx + 1].max()
-                    chandelier_sl = highest_high - atr_entry * cfg.CHANDELIER_ATR_MULTI
+                    _chand_multi = cfg.CHANDELIER_ATR_MULTI
+                    if getattr(cfg, 'USE_ADAPTIVE_CHANDELIER', False):
+                        _h4adx = getattr(self, '_current_h4_adx', 99)
+                        if not (_h4adx != _h4adx) and _h4adx < getattr(cfg, 'ADAPTIVE_CHAND_ADX_THRESHOLD', 20):
+                            _chand_multi = getattr(cfg, 'ADAPTIVE_CHAND_ATR_MULTI', 1.2)
+                    chandelier_sl = highest_high - atr_entry * _chand_multi
                     if chandelier_sl > pos["sl"] + 5 * pt:
                         pos["sl"] = chandelier_sl
 
@@ -1766,12 +1791,18 @@ class GoldBacktester:
                         pos["breakeven_done"] = True
 
                 # v2.0: Breakeven
-                if not pos["breakeven_done"] and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                # v9.2: Adaptive BE for SELL -- tighter in ranging
+                _be_multi = cfg.BE_ATR_MULTI
+                if getattr(cfg, 'USE_ADAPTIVE_CHANDELIER', False):
+                    _h4adx = getattr(self, '_current_h4_adx', 99)
+                    if not (_h4adx != _h4adx) and _h4adx < getattr(cfg, 'ADAPTIVE_CHAND_ADX_THRESHOLD', 20):
+                        _be_multi = min(_be_multi, 0.4)
+                if not pos["breakeven_done"] and profit_price >= atr_entry * _be_multi:
                     pos["sl"] = pos["entry"] - 10 * pt
                     pos["breakeven_done"] = True
 
                 # v2.0: Trailing
-                be_price = atr_entry * cfg.BE_ATR_MULTI
+                be_price = atr_entry * _be_multi
                 if profit_price >= be_price * 1.5:
                     trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
                     ns = close + trail_step
@@ -1779,10 +1810,16 @@ class GoldBacktester:
                         pos["sl"] = ns
 
                 # v3.0: Chandelier Exit for SELL
+                # v9.2: Adaptive chandelier -- tighter in ranging
                 if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
                     start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
                     lowest_low = m15_df["Low"].iloc[start_idx:bar_idx + 1].min()
-                    chandelier_sl = lowest_low + atr_entry * cfg.CHANDELIER_ATR_MULTI
+                    _chand_multi = cfg.CHANDELIER_ATR_MULTI
+                    if getattr(cfg, 'USE_ADAPTIVE_CHANDELIER', False):
+                        _h4adx = getattr(self, '_current_h4_adx', 99)
+                        if not (_h4adx != _h4adx) and _h4adx < getattr(cfg, 'ADAPTIVE_CHAND_ADX_THRESHOLD', 20):
+                            _chand_multi = getattr(cfg, 'ADAPTIVE_CHAND_ATR_MULTI', 1.2)
+                    chandelier_sl = lowest_low + atr_entry * _chand_multi
                     if chandelier_sl < pos["sl"] - 5 * pt:
                         pos["sl"] = chandelier_sl
 

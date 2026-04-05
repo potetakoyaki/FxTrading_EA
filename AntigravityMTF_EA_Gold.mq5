@@ -49,7 +49,7 @@ input group "=== 損益設定（ATRベース） ==="
 input double SL_ATR_Multi      = 1.2;      // SL = M15 ATR x 倍率 (WFA: 1.2, PF+0.36)
 input double TP_ATR_Multi      = 4.0;      // TP = M15 ATR x 倍率 (v16: Python PF=2.35同期, ATR=SMA修正後)
 input double Trail_ATR_Multi   = 1.0;      // トレーリング = ATR x 倍率 (v16: Python同期、BE/Trail/Chandelier有効)
-input double BE_ATR_Multi      = 0.8;      // 建値移動 = ATR x 倍率 (v14.3: 0.8に戻す, WFA最適値)
+input double BE_ATR_Multi      = 0.5;      // 建値移動 = ATR x 倍率 // v9.3: 0.8→0.5 (Python 16/16 PASS, earlier BE protects profits)
 input double MinSL_Points      = 200.0;    // 最小SL (ポイント)
 input double MaxSL_Points      = 1500.0;   // 最大SL (ポイント)
 
@@ -180,7 +180,7 @@ const double SR_Proximity_ATR  = 0.5;      // HARDCODED: WFA固定
 
 // --- シャンデリアイグジット詳細 ---
 const int    Chandelier_Period = 22;       // HARDCODED: WFA固定
-const double Chandelier_ATR_Multi = 2.0;   // HARDCODED: WFA検証済み (2.0, 利益ロック強化)
+const double Chandelier_ATR_Multi = 1.5;   // HARDCODED: WFA検証済み // v9.3: 2.0→1.5 (Python 16/16 PASS, tighter profit lock)
 
 // --- エクイティカーブ/Kelly詳細 ---
 const int    EquityMA_Period      = 10;    // HARDCODED: WFA固定
@@ -202,9 +202,10 @@ const double TimeDecayRate      = 0.85;    // HARDCODED: SL減衰率、WFA固定
 const double RatchetStepATR     = 0.5;     // HARDCODED: ラチェットステップ、WFA固定
 const double SlippagePoints     = 3.0;     // HARDCODED: スリッページ、通常固定
 
-// FIX: Issue #26 - Dedicated reversal SL/TP multipliers (tighter for counter-trend entries)
-const double ReversalSL_Multi  = 0.8;     // HARDCODED: Tighter SL for counter-trend reversal
-const double ReversalTP_Multi  = 0.6;     // HARDCODED: More conservative TP for counter-trend reversal
+// SYNC-FIX: Reversal SL/TP multipliers disabled — Python backtester does NOT apply these.
+// Previously 0.8 / 0.6, now 1.0 / 1.0 so MQ5 matches Python behavior.
+const double ReversalSL_Multi  = 1.0;     // SYNC-FIX: Disabled (was 0.8) — Python has no reversal SL adjustment
+const double ReversalTP_Multi  = 1.0;     // SYNC-FIX: Disabled (was 0.6) — Python has no reversal TP adjustment
 
 // --- v8.0 ERレジーム検出 ---
 const string RegimeMethod       = "er";    // HARDCODED: ER方式のみ使用
@@ -983,7 +984,7 @@ void OnTick()
       ApplyCorrelationCap(buyScore, sellScore, componentMask);
    }
 
-   // SYNC-FIX #4: Score 11 Skip (Python: SKIP_SCORE_11)
+   // SYNC-FIX: Score 11 skip ENABLED — Python fast backtester applies this (SKIP_SCORE_11=True)
    if(buyScore == 11) buyScore = 0;
    if(sellScore == 11) sellScore = 0;
 
@@ -1117,6 +1118,17 @@ void OnTick()
       }
    }
 
+   // SYNC-FIX: Ranging TP Cap — when H4 ADX < 20, cap TP at 5.0 * ATR (Python: RANGING_TP_CAP=5.0)
+   {
+      double h4adxForTP = GetIndicatorValue(h_h4_adx, 0, 1);
+      if(h4adxForTP != EMPTY_VALUE && h4adxForTP < H4_ADX_Threshold)
+      {
+         double rangingTPCap = currentATR * 5.0;  // RANGING_TP_CAP = 5.0
+         if(rangingTPCap < tpDist)
+            tpDist = rangingTPCap;
+      }
+   }
+
    // SLの最小/最大制限（ポイント単位）
    double minSL = MinSL_Points * _Point;
    double maxSL = MaxSL_Points * _Point;
@@ -1154,30 +1166,34 @@ void OnTick()
       }
    }
 
-   // SYNC-FIX #2: SRAT (Session-Regime Adaptive Threshold) replaces flat MinEntryScore
+   // SYNC-FIX #2b: SRAT floor bug fix — SRAT value used DIRECTLY as base min_score,
+   // NOT MathMax with regimeMinScore. Otherwise SRAT values below MinEntryScore (e.g. 7) are floored.
+   // DD escalation still applies on top via MathMax below.
    int currentMinScore = regimeMinScore;
    {
       MqlDateTime dtSRAT;
       TimeCurrent(dtSRAT);
       int gmtHourSRAT = (dtSRAT.hour - GMTOffset + 24) % 24;
       // Per-hour min_score from Python SRAT_THRESHOLDS
+      // SYNC-FIX: Use SRAT value directly (not MathMax) so lower thresholds actually take effect
+      bool sratApplied = false;
       switch(gmtHourSRAT)
       {
-         case 8:  currentMinScore = (int)MathMax(currentMinScore, 7);  break;
-         case 9:  currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 10: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 11: currentMinScore = (int)MathMax(currentMinScore, 99); break;
-         case 12: currentMinScore = (int)MathMax(currentMinScore, 99); break;
-         case 13: currentMinScore = (int)MathMax(currentMinScore, 12); break;
-         case 14: currentMinScore = (int)MathMax(currentMinScore, 11); break;
-         case 15: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 16: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 17: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 18: currentMinScore = (int)MathMax(currentMinScore, 12); break;
-         case 19: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 20: currentMinScore = (int)MathMax(currentMinScore, 9);  break;
-         case 21: currentMinScore = (int)MathMax(currentMinScore, 12); break;
-         default: break; // hours outside 8-21 use regimeMinScore
+         case 8:  currentMinScore = 7;  sratApplied = true; break;
+         case 9:  currentMinScore = 9;  sratApplied = true; break;
+         case 10: currentMinScore = 9;  sratApplied = true; break;
+         case 11: currentMinScore = 99; sratApplied = true; break;
+         case 12: currentMinScore = 99; sratApplied = true; break;
+         case 13: currentMinScore = 12; sratApplied = true; break;
+         case 14: currentMinScore = 11; sratApplied = true; break;
+         case 15: currentMinScore = 9;  sratApplied = true; break;
+         case 16: currentMinScore = 9;  sratApplied = true; break;
+         case 17: currentMinScore = 9;  sratApplied = true; break;
+         case 18: currentMinScore = 12; sratApplied = true; break;
+         case 19: currentMinScore = 9;  sratApplied = true; break;
+         case 20: currentMinScore = 9;  sratApplied = true; break;
+         case 21: currentMinScore = 12; sratApplied = true; break;
+         default: break; // hours outside 8-21 use regimeMinScore as fallback
       }
    }
    // SYNC-FIX #12: DD Escalation 4-level (Python: DD_ESCALATION = [(6,11),(10,13),(15,16),(20,18)])
@@ -1185,8 +1201,9 @@ void OnTick()
    else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 16);
    else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 13);
    else if(currentDD >= 6.0)  currentMinScore = (int)MathMax(currentMinScore, 11);
-   // v4.0: Ranging regime → +3
-   if(advRegime == 1) currentMinScore += 3;
+   // SYNC-FIX: Ranging regime +3 DISABLED — Python RANGING_SCORE_BOOST=0 (validated by WFA)
+   // Previously: if(advRegime == 1) currentMinScore += 3;
+   // Python instead caps TP at RANGING_TP_CAP=5.0 when H4 ADX < 20
 
    // SYNC-FIX Additional: Remove ER boost +3 (Python doesn't have this)
    // REMOVED: Legacy ER boost was: if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold) currentMinScore += RegimeScoreBoost;
@@ -2761,19 +2778,15 @@ void CheckStaleTradeExit()
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       double hours = (double)(TimeCurrent() - openTime) / 3600.0;
 
-      // FIX: Issue #18 - Close profitable stale trades at StaleTradeHours,
-      // and force-close unprofitable stale trades at StaleTradeHours * 2
+      // SYNC-FIX: Python only closes profitable stale trades at 48h, no force-close at 2x.
+      // Removed the StaleTradeHours * 2 force-close block to match Python behavior.
       double profit = PositionGetDouble(POSITION_PROFIT);
       if(hours >= StaleTradeHours && profit >= 0)
       {
          trade.PositionClose(ticket);
          Print("v4.0: 塩漬けトレード決済 (", DoubleToString(hours,1), "時間経過, profit>=0)");
       }
-      else if(hours >= StaleTradeHours * 2)
-      {
-         trade.PositionClose(ticket);
-         Print("v4.0: 塩漬けトレード強制決済 (", DoubleToString(hours,1), "時間経過, profit=", DoubleToString(profit,2), ")");
-      }
+      // SYNC-FIX: Force-close at 2x hours REMOVED — Python has no force-close for unprofitable stale trades
    }
 }
 
