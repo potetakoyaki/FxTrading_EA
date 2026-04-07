@@ -1,114 +1,170 @@
 #!/bin/bash
 # ============================================
 #  AntigravityMTF Gold EA - Mac完全自動最適化
-#  MT5最適化実行 → 結果収集 → Git Push
+#  MT5 Mac app → tester.ini差替 → 自動テスト
 # ============================================
 
-MT5_APP="/Applications/MetaTrader 5.app/Contents/MacOS/MetaTrader 5"
+MT5_APP="/Applications/MetaTrader 5.app"
+MT5_DATA="$HOME/Library/Application Support/MetaTrader 5/Bottles/metatrader5/drive_c/users/crossover/Application Data/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075"
+
 REPO_PATH="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS_DIR="${REPO_PATH}/mt5_results"
 INI_DIR="$(dirname "$0")/ini"
 
-# MT5のWineデータフォルダを自動検出
-MT5_WINE_PREFIX="$HOME/.wine"
-MT5_DATA_CANDIDATES=(
-    "$HOME/Library/Application Support/MetaTrader 5"
-    "$HOME/.wine/drive_c/Program Files/MetaTrader 5"
-    "$HOME/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5"
-)
-
 echo "============================================"
-echo " AntigravityMTF Gold EA - Mac自動最適化"
+echo " AntigravityMTF Gold EA - Mac完全自動最適化"
 echo "============================================"
 
-# MT5データフォルダを探す
-MT5_DATA=""
-for candidate in "${MT5_DATA_CANDIDATES[@]}"; do
-    if [ -d "$candidate" ]; then
-        MT5_DATA="$candidate"
-        echo "MT5 Data: $MT5_DATA"
-        break
-    fi
-done
-
-if [ -z "$MT5_DATA" ]; then
-    echo "MT5データフォルダが見つかりません。"
-    echo "MT5を開いて ファイル→データフォルダを開く でパスを確認し、"
-    echo "このスクリプトの MT5_DATA 変数を手動設定してください。"
-    echo ""
-    read -p "MT5データフォルダのパスを入力: " MT5_DATA
+# 前提チェック
+if [ ! -d "$MT5_APP" ]; then
+    echo "ERROR: MetaTrader 5.app not found"
+    exit 1
 fi
 
+if [ ! -d "$MT5_DATA" ]; then
+    echo "ERROR: MT5 data folder not found at:"
+    echo "  $MT5_DATA"
+    echo "MT5を開いて ファイル→データフォルダを開く でパスを確認してください"
+    exit 1
+fi
+
+# 結果フォルダ準備
 mkdir -p "${RESULTS_DIR}"
 rm -f "${RESULTS_DIR}"/*.xml "${RESULTS_DIR}"/*.htm "${RESULTS_DIR}"/*.txt 2>/dev/null
 
-echo ""
-echo "8パターンのバックテストを実行します..."
-echo ""
+# MT5を閉じる
+echo "MT5を閉じています..."
+pkill -f "MetaTrader 5" 2>/dev/null
+pkill -f "terminal64" 2>/dev/null
+sleep 5
 
-for i in $(seq 1 8); do
-    echo "[${i}/8] テスト実行中..."
-
-    # iniファイルをMT5のconfigフォルダにコピー
+# configフォルダ確認
+CONFIG_DIR="${MT5_DATA}/Config"
+if [ ! -d "$CONFIG_DIR" ]; then
     CONFIG_DIR="${MT5_DATA}/config"
-    mkdir -p "${CONFIG_DIR}" 2>/dev/null
+fi
+mkdir -p "${CONFIG_DIR}"
+
+# testerフォルダ確認
+TESTER_DIR="${MT5_DATA}/Tester"
+if [ ! -d "$TESTER_DIR" ]; then
+    TESTER_DIR="${MT5_DATA}/tester"
+fi
+mkdir -p "${TESTER_DIR}"
+
+echo "Config: ${CONFIG_DIR}"
+echo "Tester: ${TESTER_DIR}"
+echo ""
+
+# === 8テスト実行 ===
+for i in $(seq 1 8); do
+    echo "=========================================="
+    echo " [${i}/8] テスト実行中..."
+    echo "=========================================="
+
+    # iniファイルをconfigフォルダにコピー
     cp "${INI_DIR}/test${i}.ini" "${CONFIG_DIR}/tester.ini"
+    echo "  ini: test${i}.ini → ${CONFIG_DIR}/tester.ini"
 
-    # MT5を起動してバックテスト実行
-    # ShutdownTerminal=1 により完了後に自動終了
-    "${MT5_APP}" "/config:config/tester.ini" &
-    MT5_PID=$!
+    # テスト前のtesterフォルダのファイル一覧を記録
+    BEFORE_FILES=$(ls -1 "${TESTER_DIR}"/*.xml 2>/dev/null | sort)
 
-    # MT5の終了を待つ（最大30分）
+    # MT5をconfig引数付きで起動
+    open -a "MetaTrader 5" --args "/config:Config\\tester.ini"
+    MT5_PID=""
+    sleep 10
+
+    # MT5のPIDを取得
+    MT5_PID=$(pgrep -f "MetaTrader 5" | head -1)
+    if [ -z "$MT5_PID" ]; then
+        MT5_PID=$(pgrep -f "terminal64" | head -1)
+    fi
+    echo "  MT5 PID: ${MT5_PID:-unknown}"
+
+    # MT5の終了を待つ（最大45分）
     WAITED=0
-    while kill -0 $MT5_PID 2>/dev/null; do
-        sleep 10
-        WAITED=$((WAITED + 10))
-        if [ $WAITED -ge 1800 ]; then
-            echo "  タイムアウト(30分)。MT5を強制終了..."
-            kill $MT5_PID 2>/dev/null
+    MAX_WAIT=2700
+    while true; do
+        sleep 15
+        WAITED=$((WAITED + 15))
+
+        # MT5がまだ動いているか確認
+        if [ -n "$MT5_PID" ]; then
+            if ! kill -0 $MT5_PID 2>/dev/null; then
+                echo "  MT5終了検出 (${WAITED}秒)"
+                break
+            fi
+        else
+            # PIDが取れない場合はプロセス名で確認
+            if ! pgrep -f "terminal64" > /dev/null 2>&1 && ! pgrep -f "MetaTrader 5" > /dev/null 2>&1; then
+                echo "  MT5終了検出 (${WAITED}秒)"
+                break
+            fi
+        fi
+
+        if [ $WAITED -ge $MAX_WAIT ]; then
+            echo "  タイムアウト(45分)。強制終了..."
+            pkill -f "MetaTrader 5" 2>/dev/null
+            pkill -f "terminal64" 2>/dev/null
             sleep 5
             break
         fi
-        # 進捗表示
-        if [ $((WAITED % 60)) -eq 0 ]; then
-            echo "  ${WAITED}秒経過..."
+
+        if [ $((WAITED % 120)) -eq 0 ]; then
+            echo "  ${WAITED}秒 ($((WAITED/60))分) 経過..."
         fi
     done
 
-    # 結果ファイルを収集
-    TESTER_DIR="${MT5_DATA}/tester"
-    if [ -d "${TESTER_DIR}" ]; then
-        # 最新のレポートファイルをコピー
-        LATEST=$(ls -t "${TESTER_DIR}"/*.xml 2>/dev/null | head -1)
-        if [ -n "$LATEST" ]; then
-            cp "$LATEST" "${RESULTS_DIR}/test${i}_report.xml"
-            echo "  [${i}/8] 結果取得: $(basename $LATEST)"
-        fi
+    # 結果ファイルを収集（テスト後に新しく生成されたもの）
+    sleep 3
+    AFTER_FILES=$(ls -1 "${TESTER_DIR}"/*.xml 2>/dev/null | sort)
+    NEW_FILE=$(comm -13 <(echo "$BEFORE_FILES") <(echo "$AFTER_FILES") | head -1)
 
-        LATEST_HTM=$(ls -t "${TESTER_DIR}"/*.htm 2>/dev/null | head -1)
-        if [ -n "$LATEST_HTM" ]; then
-            cp "$LATEST_HTM" "${RESULTS_DIR}/test${i}_report.htm"
+    if [ -n "$NEW_FILE" ] && [ -f "$NEW_FILE" ]; then
+        cp "$NEW_FILE" "${RESULTS_DIR}/test${i}_report.xml"
+        echo "  結果: $(basename $NEW_FILE) → test${i}_report.xml"
+    else
+        # 最新ファイルをコピー
+        LATEST=$(ls -t "${TESTER_DIR}"/*.xml 2>/dev/null | head -1)
+        if [ -n "$LATEST" ] && [ -f "$LATEST" ]; then
+            cp "$LATEST" "${RESULTS_DIR}/test${i}_report.xml"
+            echo "  結果(最新): $(basename $LATEST)"
+        else
+            echo "  警告: 結果ファイルなし"
+            ls -lt "${TESTER_DIR}"/ 2>/dev/null | head -5 > "${RESULTS_DIR}/debug_test${i}.txt"
         fi
     fi
 
-    sleep 3
+    # HTMレポートも収集
+    LATEST_HTM=$(ls -t "${TESTER_DIR}"/*.htm 2>/dev/null | head -1)
+    if [ -n "$LATEST_HTM" ] && [ -f "$LATEST_HTM" ]; then
+        cp "$LATEST_HTM" "${RESULTS_DIR}/test${i}_report.htm"
+    fi
+
+    # XLSXレポートも収集
+    LATEST_XLSX=$(ls -t "${TESTER_DIR}"/*.xlsx 2>/dev/null | head -1)
+    if [ -n "$LATEST_XLSX" ] && [ -f "$LATEST_XLSX" ]; then
+        cp "$LATEST_XLSX" "${RESULTS_DIR}/test${i}_report.xlsx"
+    fi
+
+    # 次のテスト前に完全停止
+    pkill -f "MetaTrader 5" 2>/dev/null
+    pkill -f "terminal64" 2>/dev/null
+    sleep 8
 done
 
 # ============================================
-#  結果サマリー生成
+#  サマリー生成
 # ============================================
-
 echo ""
-echo "結果サマリーを生成中..."
+echo "結果サマリー生成中..."
 
-cat > "${RESULTS_DIR}/summary.txt" << SUMMARY
-# MT5 Backtest Results
+cat > "${RESULTS_DIR}/summary.txt" << EOF
+# MT5 Backtest Results (Mac Auto)
 Generated: $(date)
-MT5 Data: ${MT5_DATA}
 
-## Test Configurations
-Test 1: BE=0.5, Partial=ON
+## Configurations
+Test 1: BE=0.5, Partial=ON  (現行v9.3)
 Test 2: BE=0.5, Partial=OFF
 Test 3: BE=1.0, Partial=ON
 Test 4: BE=1.0, Partial=OFF
@@ -117,26 +173,27 @@ Test 6: BE=1.5, Partial=OFF
 Test 7: BE=2.0, Partial=ON
 Test 8: BE=2.0, Partial=OFF
 
-## Files
+## Collected Files
 $(ls -la "${RESULTS_DIR}"/ 2>/dev/null)
-SUMMARY
+EOF
+
+echo ""
+echo "収集された結果:"
+ls -la "${RESULTS_DIR}"/
 
 # ============================================
 #  GitHubにプッシュ
 # ============================================
-
 echo ""
 echo "GitHubにプッシュ中..."
 
 cd "${REPO_PATH}"
 git add mt5_results/
-git commit -m "MT5 auto backtest results (Mac): 8 patterns - $(date +%Y%m%d_%H%M)"
+git commit -m "MT5 Mac auto backtest: 8 patterns (BE x Partial) - $(date +%Y%m%d_%H%M)"
 git push origin main
 
 echo ""
 echo "============================================"
-echo " 完了！"
-echo " 結果: ${RESULTS_DIR}/"
-echo " GitHubにプッシュ済み"
+echo " 完了！GitHubにプッシュ済み"
 echo " Claude Codeで「結果を分析して」と伝えてください"
 echo "============================================"
