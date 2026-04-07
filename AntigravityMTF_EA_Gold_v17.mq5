@@ -2934,7 +2934,8 @@ bool IsNewsTime()
    MqlCalendarValue values[];
    datetime from = TimeCurrent() - NewsBlockMinutes * 60;
    datetime to   = TimeCurrent() + NewsBlockMinutes * 60;
-   int count = CalendarValueHistory(values, from, to);
+   if(!CalendarValueHistory(values, from, to)) return false;
+   int count = ArraySize(values);
    for(int i = 0; i < count; i++)
    {
       MqlCalendarEvent event;

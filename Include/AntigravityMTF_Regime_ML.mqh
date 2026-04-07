@@ -22,7 +22,7 @@
 
 #property copyright "Antigravity Trading System"
 #property version   "1.00"
-#property strict
+// #property strict  // Removed: MQL4 only, not valid in MQL5
 
 //+------------------------------------------------------------------+
 //| Constants                                                        |

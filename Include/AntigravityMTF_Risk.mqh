@@ -10,7 +10,7 @@
 #property copyright "AntigravityMTF"
 #property link      ""
 #property version   "1.00"
-#property strict
+// #property strict  // Removed: MQL4 only, not valid in MQL5
 
 #include <Trade\Trade.mqh>
 
@@ -1537,7 +1537,6 @@ double CRiskManager::CalcRiskAmountFromSL(string symbol, ENUM_ORDER_TYPE order_t
       // Approximate: Gold 1 lot = 100 oz, $1/point = $100/dollar-move
       double lossEstimate = (sl_dist / 0.01) * 1.0 * lot_size;
       // Convert USD to account currency if needed
-      ENUM_ACCOUNT_CURRENCY accCcy;
       string accCurrency = AccountInfoString(ACCOUNT_CURRENCY);
       if(accCurrency == "JPY")
          lossEstimate *= usdJpyRate;
