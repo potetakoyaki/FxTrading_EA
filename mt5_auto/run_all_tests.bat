@@ -1,75 +1,77 @@
 @echo off
-chcp 65001
+chcp 65001 > nul
 echo ============================================
-echo  AntigravityMTF Gold EA - 自動バックテスト
-echo  8パターンを順番にテストします
+echo  AntigravityMTF Gold EA - 完全自動テスト
+echo  8パターンテスト → 結果収集 → Git Push
 echo ============================================
 
-REM === ここを自分の環境に合わせて変更 ===
+REM =============================================
+REM  ここを自分の環境に合わせて変更（初回のみ）
+REM =============================================
 set MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
-set SCRIPT_DIR=%~dp0
-
-REM MT5のデータフォルダのパス (ファイル→データフォルダを開く で確認)
 set MT5_DATA=C:\Users\%USERNAME%\AppData\Roaming\MetaQuotes\Terminal\YOUR_TERMINAL_ID
+set REPO_PATH=%~dp0..
+REM =============================================
+
+set RESULTS_DIR=%REPO_PATH%\mt5_results
+if not exist "%RESULTS_DIR%" mkdir "%RESULTS_DIR%"
+
+REM 古い結果を削除
+del /Q "%RESULTS_DIR%\*" 2>nul
 
 echo.
-echo [注意] MT5_PATH と MT5_DATA を自分の環境に合わせてください
-echo MT5_PATH: %MT5_PATH%
-echo MT5_DATA: %MT5_DATA%
+echo MT5: %MT5_PATH%
+echo Data: %MT5_DATA%
+echo Repo: %REPO_PATH%
+echo Results: %RESULTS_DIR%
 echo.
-pause
 
-REM テスト1: BE=0.5, Partial=ON
-echo [1/8] BE=0.5, Partial=ON ...
-copy /Y "%SCRIPT_DIR%ini\test1.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
+REM === 8テスト実行 ===
+for /L %%i in (1,1,8) do (
+    echo [%%i/8] テスト実行中...
+    copy /Y "%~dp0ini\test%%i.ini" "%MT5_DATA%\config\tester.ini" > nul
+    start /wait "" "%MT5_PATH%" /config:config\tester.ini
 
-REM テスト2: BE=0.5, Partial=OFF
-echo [2/8] BE=0.5, Partial=OFF ...
-copy /Y "%SCRIPT_DIR%ini\test2.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
+    REM レポートをコピー
+    if exist "%MT5_DATA%\tester\test%%i*.xml" (
+        copy /Y "%MT5_DATA%\tester\test%%i*.xml" "%RESULTS_DIR%\test%%i.xml" > nul
+        echo   [%%i/8] XML結果コピー完了
+    )
+    if exist "%MT5_DATA%\tester\test%%i*.htm" (
+        copy /Y "%MT5_DATA%\tester\test%%i*.htm" "%RESULTS_DIR%\test%%i.htm" > nul
+        echo   [%%i/8] HTML結果コピー完了
+    )
 
-REM テスト3: BE=1.0, Partial=ON
-echo [3/8] BE=1.0, Partial=ON ...
-copy /Y "%SCRIPT_DIR%ini\test3.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
+    REM testerフォルダの最新レポートもコピー
+    for /f "delims=" %%f in ('dir /b /od "%MT5_DATA%\tester\*.xml" 2^>nul') do set LATEST_XML=%%f
+    if defined LATEST_XML (
+        copy /Y "%MT5_DATA%\tester\%LATEST_XML%" "%RESULTS_DIR%\test%%i_report.xml" > nul
+    )
+    set LATEST_XML=
 
-REM テスト4: BE=1.0, Partial=OFF
-echo [4/8] BE=1.0, Partial=OFF ...
-copy /Y "%SCRIPT_DIR%ini\test4.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
-
-REM テスト5: BE=1.5, Partial=ON
-echo [5/8] BE=1.5, Partial=ON ...
-copy /Y "%SCRIPT_DIR%ini\test5.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
-
-REM テスト6: BE=1.5, Partial=OFF
-echo [6/8] BE=1.5, Partial=OFF ...
-copy /Y "%SCRIPT_DIR%ini\test6.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
-
-REM テスト7: BE=2.0, Partial=ON
-echo [7/8] BE=2.0, Partial=ON ...
-copy /Y "%SCRIPT_DIR%ini\test7.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
-
-REM テスト8: BE=2.0, Partial=OFF
-echo [8/8] BE=2.0, Partial=OFF ...
-copy /Y "%SCRIPT_DIR%ini\test8.ini" "%MT5_DATA%\config\tester.ini"
-"%MT5_PATH%" /config:tester.ini
-timeout /t 5
+    timeout /t 3 /nobreak > nul
+)
 
 echo.
 echo ============================================
-echo  全8テスト完了
-echo  結果は MT5_DATA\tester\ フォルダにあります
+echo  全テスト完了。結果をGitHubにプッシュ中...
+echo ============================================
+
+REM 結果一覧を生成
+echo # MT5 Backtest Results > "%RESULTS_DIR%\summary.txt"
+echo Generated: %date% %time% >> "%RESULTS_DIR%\summary.txt"
+echo. >> "%RESULTS_DIR%\summary.txt"
+dir /b "%RESULTS_DIR%\*" >> "%RESULTS_DIR%\summary.txt"
+
+REM Git push
+cd /d "%REPO_PATH%"
+git add mt5_results\
+git commit -m "MT5 auto backtest results: 8 patterns (BE x Partial)"
+git push origin main
+
+echo.
+echo ============================================
+echo  完了！結果がGitHubにプッシュされました
+echo  Claude Codeで分析を依頼してください
 echo ============================================
 pause
