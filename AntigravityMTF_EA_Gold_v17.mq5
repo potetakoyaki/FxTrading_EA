@@ -3325,7 +3325,10 @@ void LoadComponentStats()
 // CODEX-FIX: NEW HIGH #4 - Helper function for symbol/magic-scoped GlobalVariable keys
 string GVKey(string suffix)
 {
-   return "AGMTF_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
+   string key = "AGMTF_" + IntegerToString(MagicNumber) + "_" + _Symbol + "_" + suffix;
+   if(StringLen(key) > 63)
+      key = StringSubstr(key, 0, 63);
+   return key;
 }
 
 // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL and FREEZE_LEVEL
@@ -3622,6 +3625,7 @@ double GetIndicatorValue(int handle, int buffer, int shift)
 {
    double val[];
    if(CopyBuffer(handle, buffer, shift, 1, val) <= 0) return 0;
+   if(val[0] == EMPTY_VALUE) return 0;
    return val[0];
 }
 //+------------------------------------------------------------------+
