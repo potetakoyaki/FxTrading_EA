@@ -13,7 +13,7 @@
 #property version   "17.00"
 #property strict
 
-#include "../../libs/JAson/Include/JAson.mqh"
+#include <JAson.mqh>
 
 //+------------------------------------------------------------------+
 //| Configuration version string                                      |
