@@ -1,0 +1,57 @@
+name: Gold EA Backtest
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6AM UTC
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pandas numpy ta scipy pyzmq yfinance
+
+      - name: Run WFA Backtest
+        run: python backtest_gold.py --wfa --output results.json
+        working-directory: .
+
+      - name: Validate Results
+        run: |
+          python -c "
+          import json
+          with open('results.json') as f:
+              r = json.load(f)
+          pf = r.get('aggregate_pf', 0)
+          passes = r.get('wfa_passes', 0)
+          total = r.get('wfa_total', 16)
+          dd = r.get('max_dd', 100)
+
+          print(f'PF={pf:.2f}, WFA={passes}/{total}, DD={dd:.1f}%')
+
+          failures = []
+          if pf < 1.2: failures.append(f'PF {pf:.2f} < 1.2')
+          if passes < 12: failures.append(f'WFA {passes}/{total} < 12/16')
+          if dd > 30: failures.append(f'DD {dd:.1f}% > 30%')
+
+          if failures:
+              print('FAIL: ' + ', '.join(failures))
+              exit(1)
+          print('PASS: All thresholds met')
+          "
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: results.json

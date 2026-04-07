@@ -34,9 +34,9 @@ class GoldConfig:
     # ATR-based SL/TP (v2.0)
     ATR_PERIOD = 14
     SL_ATR_MULTI = 1.2         # v6.1: tighter SL for better RR (1.5→1.2, PF 1.60→1.96)
-    TP_ATR_MULTI = 4.0         # v8.1: tighter TP (5.0→4.0: WFA 12→13/14 with RTP=5.0)
+    TP_ATR_MULTI = 4.0         # v9.3: MQL5同期 (v9.4の3.5→4.0に戻し)
     TRAIL_ATR_MULTI = 1.0
-    BE_ATR_MULTI = 0.5         # v9.3: 0.8→0.5 (16/16 PASS, 早期BEで利益保護)
+    BE_ATR_MULTI = 0.5         # v9.3: MQL5同期 (v9.4の0.4→0.5に戻し)
     MIN_SL_POINTS = 200
     MAX_SL_POINTS = 1500
 
@@ -53,7 +53,7 @@ class GoldConfig:
     USE_MOMENTUM = True
 
     # Partial close (v2.0)
-    USE_PARTIAL_CLOSE = True
+    USE_PARTIAL_CLOSE = False
     PARTIAL_CLOSE_RATIO = 0.5
     PARTIAL_TP_RATIO = 0.5
 
@@ -105,8 +105,8 @@ class GoldConfig:
 
     # v3.0: Chandelier Exit
     USE_CHANDELIER_EXIT = True
-    CHANDELIER_PERIOD = 22
-    CHANDELIER_ATR_MULTI = 1.5  # v9.3: 2.0→1.5 (16/16 PASS, 利益ロック高速化)
+    CHANDELIER_PERIOD = 22     # v9.3: MQL5同期 (v9.4の30→22に戻し)
+    CHANDELIER_ATR_MULTI = 1.5  # v9.3: MQL5同期 (v9.4の2.0→1.5に戻し)
 
     # v3.0: Equity Curve Filter
     USE_EQUITY_CURVE = True
@@ -299,6 +299,92 @@ class GoldConfig:
     SLIPPAGE_POINTS = 3               # Additional slippage in points per trade
     COMMISSION_PER_LOT = 7.0          # USD per round-trip lot (ECN Gold typical)
     USE_INTRABAR_SLTP_ORDER = True    # Determine SL/TP hit order using OHLC proximity
+
+    # v12.0: Intra-bar tick path simulation for exit management
+    # Generates synthetic O->L->H->C (bullish) or O->H->L->C (bearish) path
+    # and checks exit conditions at each point, mimicking MT5 tick processing.
+    USE_INTRABAR_SIM = False
+
+    @classmethod
+    def load_from_json(cls, filepath="config/v17_params.json"):
+        """Load parameters from JSON single source of truth.
+
+        Maps all JSON keys to GoldConfig class attributes.
+        Returns the version string from the JSON file.
+        """
+        import json
+        with open(filepath) as f:
+            params = json.load(f)
+
+        # --- Risk ---
+        risk = params["risk"]
+        cls.RISK_PERCENT = risk["risk_percent"]
+        cls.MAX_LOT = risk["max_lots"]
+        cls.MIN_LOT = risk["min_lots"]
+        cls.MAX_SPREAD_POINTS = risk["max_spread"]
+        cls.MAX_DD_PERCENT = risk["max_drawdown_pct"]
+        cls.DD_HALF_RISK = risk["dd_half_risk_pct"]
+        cls.DAILY_MAX_LOSS_PCT = risk["daily_max_loss_pct"]
+
+        # --- SL/TP ---
+        sl_tp = params["sl_tp"]
+        cls.SL_ATR_MULTI = sl_tp["sl_atr_multi"]
+        cls.TP_ATR_MULTI = sl_tp["tp_atr_multi"]
+        cls.TRAIL_ATR_MULTI = sl_tp["trail_atr_multi"]
+        cls.BE_ATR_MULTI = sl_tp["be_atr_multi"]
+        cls.MIN_SL_POINTS = sl_tp["min_sl_points"]
+        cls.MAX_SL_POINTS = sl_tp["max_sl_points"]
+
+        # --- Chandelier ---
+        chand = params["chandelier"]
+        cls.CHANDELIER_PERIOD = chand["period"]
+        cls.CHANDELIER_ATR_MULTI = chand["atr_multi"]
+
+        # --- Entry ---
+        entry = params["entry"]
+        cls.MIN_SCORE = entry["min_score"]
+        cls.COOLDOWN_BARS = entry["cooldown_minutes"] // 15  # Convert minutes to M15 bars
+        cls.SCORE_MARGIN_MIN = entry.get("score_margin_min", 0)
+
+        # --- Time ---
+        time_cfg = params["time"]
+        cls.TRADE_START_HOUR = time_cfg["trade_start_hour"]
+        cls.TRADE_END_HOUR = time_cfg["trade_end_hour"]
+        cls.FRIDAY_CLOSE_HOUR = time_cfg["friday_close_hour"]
+
+        # --- Regime ---
+        regime = params["regime"]
+        cls.RANGING_ADX_THRESHOLD = regime["ranging_adx_threshold"]
+        cls.RANGING_TP_CAP = regime["ranging_tp_cap"]
+
+        # --- Features ---
+        feat = params["features"]
+        cls.USE_RSI_MOMENTUM_CONFIRM = feat["use_rsi_momentum_confirm"]
+        cls.USE_PARTIAL_CLOSE = feat["use_partial_close"]
+        cls.PARTIAL_CLOSE_RATIO = feat["partial_close_ratio"]
+        cls.PARTIAL_TP_RATIO = feat["partial_tp_ratio"]
+        cls.USE_REVERSAL_MODE = feat["use_reversal_mode"]
+        cls.USE_CHANDELIER_EXIT = feat["use_chandelier_exit"]
+        cls.USE_EQUITY_CURVE = feat["use_equity_curve_filter"]
+        cls.USE_NEWS_FILTER = feat["use_news_filter"]
+        cls.USE_WEEKEND_CLOSE = feat["use_weekend_close"]
+        cls.USE_CORRELATION = feat["use_correlation"]
+
+        # --- Kelly ---
+        kelly = params["kelly"]
+        cls.KELLY_LOOKBACK = kelly["lookback_trades"]
+        cls.KELLY_FRACTION = kelly["fraction"]
+        cls.KELLY_MIN_RISK = kelly["min_risk"]
+        cls.KELLY_MAX_RISK = kelly["max_risk"]
+
+        # --- SRAT ---
+        cls.SRAT_THRESHOLDS = {int(k): v for k, v in params["srat"].items()}
+
+        # --- DD Escalation ---
+        dd = params["dd_escalation"]
+        cls.DD_ESCALATION = list(zip(dd["levels"], dd["score_add"]))
+
+        return params["version"]
 
 
 # ============================================================
@@ -1529,7 +1615,10 @@ class GoldBacktester:
         pt = cfg.POINT
 
         # v10.0: Use actual bar spread if available, otherwise fall back to fixed estimate
-        if getattr(cfg, 'USE_REALISTIC_SPREAD', False) and bar_spread_points is not None:
+        # FIX: NaN spread (pre-2022 interpolated data) must fall back to fixed spread
+        if (getattr(cfg, 'USE_REALISTIC_SPREAD', False)
+                and bar_spread_points is not None
+                and not np.isnan(bar_spread_points)):
             half_spread = bar_spread_points * pt * 0.5
             slippage = getattr(cfg, 'SLIPPAGE_POINTS', 0) * pt
         else:
@@ -1578,15 +1667,239 @@ class GoldBacktester:
             pos["component_mask"] = component_mask[:]
         self.open_positions.append(pos)
 
+    # ================================================================
+    # v12.0: Intra-bar tick path simulation for exit management
+    # ================================================================
+    @staticmethod
+    def _generate_intrabar_path(bar_open, high, low, close):
+        """Generate synthetic tick path within a bar.
+
+        Rules:
+        - Bullish bar (close > open): O -> L -> H -> C
+        - Bearish bar (close <= open): O -> H -> L -> C (pessimistic for doji)
+
+        This is the standard MT5 "Open prices" approximation,
+        applied to exit management so SL/BE/Trail are evaluated
+        before TP within each bar, matching real tick processing order.
+        """
+        if close > bar_open:  # Bullish
+            return [bar_open, low, high, close]
+        else:  # Bearish or Doji
+            return [bar_open, high, low, close]
+
+    def _manage_positions_intrabar(self, high, low, close, time, bar_idx, m15_df,
+                                   bar_open=None, bar_spread_points=None):
+        """v12.0: Position management with synthetic intra-bar tick path.
+
+        For each price point on the path (O->L->H->C or O->H->L->C):
+        1. Check SL hit -> close position
+        2. Check partial close level -> partial close + move SL to BE
+        3. Check BE level -> move SL to breakeven
+        4. Check trailing stop -> tighten SL
+        5. Check chandelier exit -> tighten SL
+        6. After tightening SL above, re-check SL hit (can exit same bar)
+        7. Check TP hit -> close position
+        """
+        cfg = self.cfg
+        pt = cfg.POINT
+
+        if bar_open is None:
+            bar_open = close  # fallback
+
+        # Generate synthetic tick path
+        path = self._generate_intrabar_path(bar_open, high, low, close)
+
+        # v10.0: Compute spread-adjusted exit prices for SL/TP
+        # FIX: NaN spread (pre-2022 interpolated data) must fall back to zero spread
+        _realistic = getattr(cfg, 'USE_REALISTIC_SPREAD', False)
+        _spread_valid = (bar_spread_points is not None
+                         and not np.isnan(bar_spread_points))
+        if _realistic and _spread_valid:
+            half_spread = bar_spread_points * pt * 0.5
+        else:
+            half_spread = 0
+
+        commission_per_lot = getattr(cfg, 'COMMISSION_PER_LOT', 0)
+
+        # Adaptive BE/Chandelier pre-compute
+        _use_adaptive = getattr(cfg, 'USE_ADAPTIVE_CHANDELIER', False)
+        _adaptive_adx_thresh = getattr(cfg, 'ADAPTIVE_CHAND_ADX_THRESHOLD', 20)
+        _adaptive_chand_multi = getattr(cfg, 'ADAPTIVE_CHAND_ATR_MULTI', 1.2)
+        _h4adx = getattr(self, '_current_h4_adx', 99)
+        _is_ranging = (_use_adaptive and not (_h4adx != _h4adx)
+                       and _h4adx < _adaptive_adx_thresh)
+
+        # Chandelier: pre-compute highest_high / lowest_low for this bar
+        _chand_highest = None
+        _chand_lowest = None
+        if cfg.USE_CHANDELIER_EXIT:
+            start_idx = max(0, bar_idx - cfg.CHANDELIER_PERIOD)
+            _chand_highest = m15_df["High"].iloc[start_idx:bar_idx + 1].max()
+            _chand_lowest = m15_df["Low"].iloc[start_idx:bar_idx + 1].min()
+
+        for pos in list(self.open_positions):
+            # v4.0: Stale trade exit (checked once per bar, not per tick)
+            if self.check_stale_trade(pos, bar_idx):
+                if pos["direction"] == "BUY":
+                    unrealized = close - pos["entry"]
+                else:
+                    unrealized = pos["entry"] - close
+                if unrealized >= 0:
+                    self._close_position(pos, close, time, "Stale", bar_idx,
+                                         bar_spread_points=bar_spread_points)
+                continue
+
+            is_buy = (pos["direction"] == "BUY")
+            atr_entry = pos["atr_at_entry"]
+            pos_closed = False
+
+            for price_point in path:
+                if pos_closed:
+                    break
+
+                # ---- 1. SL check (worst case first) ----
+                if is_buy and price_point <= pos["sl"]:
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    pos_closed = True
+                    break
+                if not is_buy and price_point >= pos["sl"]:
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    pos_closed = True
+                    break
+
+                # Compute profit at this price point
+                if is_buy:
+                    profit_price = price_point - pos["entry"]
+                else:
+                    profit_price = pos["entry"] - price_point
+
+                # ---- 2. Partial close check ----
+                if cfg.USE_PARTIAL_CLOSE and not pos["partial_done"]:
+                    if profit_price >= pos["tp_dist"] * cfg.PARTIAL_TP_RATIO:
+                        closed_lot = pos["original_lot"] * cfg.PARTIAL_CLOSE_RATIO
+                        remaining_lot = pos["lot"] - closed_lot
+                        if remaining_lot < cfg.MIN_LOT:
+                            remaining_lot = cfg.MIN_LOT
+                            closed_lot = pos["lot"] - remaining_lot
+
+                        if closed_lot > 0:
+                            # Use the path price point as exit price (adjusted for spread)
+                            if is_buy:
+                                partial_exit = price_point - half_spread
+                                partial_profit = partial_exit - pos["entry"]
+                            else:
+                                partial_exit = price_point + half_spread
+                                partial_profit = pos["entry"] - partial_exit
+                            pnl_pts_partial = partial_profit / pt
+                            pnl_usd = pnl_pts_partial * pt * cfg.CONTRACT_SIZE * closed_lot
+                            if commission_per_lot > 0:
+                                pnl_usd -= commission_per_lot * closed_lot * 0.5
+                            pnl_jpy = pnl_usd * 150.0
+                            self.balance += pnl_jpy
+                            self.peak_balance = max(self.peak_balance, self.balance)
+                            self.daily_pnl += pnl_jpy
+                            self.trades.append({
+                                "open_time": pos["open_time"],
+                                "close_time": time,
+                                "direction": pos["direction"],
+                                "entry": round(pos["entry"], 2),
+                                "exit": round(partial_exit, 2),
+                                "lot": closed_lot,
+                                "pnl_pts": round(pnl_pts_partial, 1),
+                                "pnl_usd": round(pnl_usd, 2),
+                                "pnl_jpy": round(pnl_jpy, 0),
+                                "balance": round(self.balance, 0),
+                                "reason": "Partial",
+                                "score": pos["score"],
+                                "entry_type": pos.get("entry_type", "normal"),
+                                "momentum_burst": pos.get("momentum_burst", False),
+                            })
+                            self.recent_trade_pnls.append(pnl_jpy)
+                            pos["lot"] = remaining_lot
+                        # Move SL to breakeven
+                        if is_buy:
+                            pos["sl"] = pos["entry"] + 10 * pt
+                        else:
+                            pos["sl"] = pos["entry"] - 10 * pt
+                        pos["partial_done"] = True
+                        pos["breakeven_done"] = True
+
+                # ---- 3. Breakeven check ----
+                _be_multi = cfg.BE_ATR_MULTI
+                if _is_ranging:
+                    _be_multi = min(_be_multi, 0.4)
+                if not pos["breakeven_done"] and profit_price >= atr_entry * _be_multi:
+                    if is_buy:
+                        pos["sl"] = pos["entry"] + 10 * pt
+                    else:
+                        pos["sl"] = pos["entry"] - 10 * pt
+                    pos["breakeven_done"] = True
+
+                # ---- 4. Trailing stop ----
+                be_price = atr_entry * _be_multi
+                if profit_price >= be_price * 1.5:
+                    trail_step = atr_entry * cfg.TRAIL_ATR_MULTI
+                    if is_buy:
+                        ns = price_point - trail_step
+                        if ns > pos["sl"] + 5 * pt:
+                            pos["sl"] = ns
+                    else:
+                        ns = price_point + trail_step
+                        if ns < pos["sl"] - 5 * pt or pos["sl"] == 0:
+                            pos["sl"] = ns
+
+                # ---- 5. Chandelier exit ----
+                if cfg.USE_CHANDELIER_EXIT and profit_price >= atr_entry * cfg.BE_ATR_MULTI:
+                    _chand_multi = cfg.CHANDELIER_ATR_MULTI
+                    if _is_ranging:
+                        _chand_multi = _adaptive_chand_multi
+                    if is_buy and _chand_highest is not None:
+                        chandelier_sl = _chand_highest - atr_entry * _chand_multi
+                        if chandelier_sl > pos["sl"] + 5 * pt:
+                            pos["sl"] = chandelier_sl
+                    elif not is_buy and _chand_lowest is not None:
+                        chandelier_sl = _chand_lowest + atr_entry * _chand_multi
+                        if chandelier_sl < pos["sl"] - 5 * pt:
+                            pos["sl"] = chandelier_sl
+
+                # ---- 6. Re-check SL after tightening (mid-bar SL hit) ----
+                if is_buy and price_point <= pos["sl"]:
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    pos_closed = True
+                    break
+                if not is_buy and price_point >= pos["sl"]:
+                    self._close_position(pos, pos["sl"], time, "SL", bar_idx)
+                    pos_closed = True
+                    break
+
+                # ---- 7. TP check last (best case) ----
+                if is_buy and price_point >= pos["tp"]:
+                    self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    pos_closed = True
+                    break
+                if not is_buy and price_point <= pos["tp"]:
+                    self._close_position(pos, pos["tp"], time, "TP", bar_idx)
+                    pos_closed = True
+                    break
+
     def _manage_positions(self, high, low, close, time, bar_idx, m15_df,
                           bar_open=None, bar_spread_points=None):
+        # v12.0: Dispatch to intra-bar simulation if enabled
+        if getattr(self.cfg, 'USE_INTRABAR_SIM', False) and bar_open is not None:
+            return self._manage_positions_intrabar(
+                high, low, close, time, bar_idx, m15_df,
+                bar_open=bar_open, bar_spread_points=bar_spread_points)
+
         cfg = self.cfg
         pt = cfg.POINT
 
         # v10.0: Compute spread-adjusted exit prices for SL/TP
+        # FIX: NaN spread (pre-2022 interpolated data) must fall back to zero spread
         _realistic = getattr(cfg, 'USE_REALISTIC_SPREAD', False)
         _intrabar = getattr(cfg, 'USE_INTRABAR_SLTP_ORDER', False)
-        if _realistic and bar_spread_points is not None:
+        _spread_valid = (bar_spread_points is not None
+                         and not np.isnan(bar_spread_points))
+        if _realistic and _spread_valid:
             half_spread = bar_spread_points * pt * 0.5
         else:
             half_spread = 0  # legacy: no spread on exits
@@ -1849,7 +2162,9 @@ class GoldBacktester:
             else:
                 # Market close (Stale, Weekend, EndOfPeriod, TimeExit, BB_Mid_TP, etc.)
                 # Exit at market: BUY sells at Bid, SELL buys at Ask
-                if bar_spread_points is not None:
+                # FIX: NaN spread (pre-2022 interpolated data) must fall back to zero
+                if (bar_spread_points is not None
+                        and not np.isnan(bar_spread_points)):
                     half_spread = bar_spread_points * pt * 0.5
                 else:
                     half_spread = 0
