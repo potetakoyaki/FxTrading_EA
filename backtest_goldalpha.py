@@ -135,7 +135,7 @@ def np_sma(arr, period):
 # GoldAlpha Backtester
 # ============================================================
 class GoldAlphaConfig:
-    """Default v12 parameters"""
+    """Default v15 parameters"""
     # Trend
     W1_FastEMA = 8
     W1_SlowEMA = 21
@@ -146,18 +146,18 @@ class GoldAlphaConfig:
     H4_EMA = 20
     ATR_Period = 14
     ATR_SMA = 50
-    EMA_Zone_ATR = 0.4
-    ATR_Filter = 0.6
-    BodyRatio = 0.32
+    EMA_Zone_ATR = 0.6
+    ATR_Filter = 0.25
+    BodyRatio = 0.34
 
     # Risk/Exit
-    SL_ATR_Mult = 2.0
-    Trail_ATR = 2.5
-    BE_ATR = 1.5
-    RiskPct = 2.5
+    SL_ATR_Mult = 3.0
+    Trail_ATR = 3.0
+    BE_ATR = 1.0
+    RiskPct = 1.5
     MinLot = 0.01
     MaxLot = 0.50
-    MaxPositions = 2
+    MaxPositions = 4
 
     # Fixed
     INITIAL_BALANCE = 300_000  # JPY
@@ -783,25 +783,25 @@ def grid_search(h4_df, param_grid, base_cfg=None):
 # ============================================================
 # Main: v14 final validation
 # ============================================================
-def make_v14_config(risk=3.0, maxlot=0.75):
-    """Create v14 config with optimized parameters"""
+def make_v15_config(risk=1.5, maxlot=0.50):
+    """Create v15 config with optimized parameters"""
     cfg = GoldAlphaConfig()
-    # Entry (v13 base)
+    # Entry (v15)
     cfg.BodyRatio = 0.34
-    cfg.EMA_Zone_ATR = 0.40
-    cfg.ATR_Filter = 0.35
+    cfg.EMA_Zone_ATR = 0.60
+    cfg.ATR_Filter = 0.25
     cfg.D1_Tolerance = 0.003
-    cfg.MaxPositions = 3
-    # Exit (v13 base)
-    cfg.SL_ATR_Mult = 2.5
-    cfg.Trail_ATR = 3.5
-    cfg.BE_ATR = 1.5
+    cfg.MaxPositions = 4
+    # Exit (v15)
+    cfg.SL_ATR_Mult = 3.0
+    cfg.Trail_ATR = 3.0
+    cfg.BE_ATR = 1.0
     # Risk
     cfg.RiskPct = risk
     cfg.MaxLot = maxlot
-    # v14 new features
+    # v15 features
     cfg.USE_STRUCTURE = True
-    cfg.STRUCTURE_BARS = 3
+    cfg.STRUCTURE_BARS = 2
     cfg.USE_TIME_DECAY = True
     cfg.MAX_HOLD_BARS = 30
     return cfg
@@ -823,7 +823,7 @@ def main():
     # Risk scaling table
     # =====================================================
     print("\n" + "=" * 70)
-    print("GoldAlpha v14 -- Risk Scaling (2016-2026)")
+    print("GoldAlpha v15 -- Risk Scaling (2016-2026)")
     print("=" * 70)
     print(f"{'Risk%':>6} {'MaxLot':>6} | {'PF':>5} {'Trades':>6} {'DD%':>6} {'WR%':>5} "
           f"{'Daily':>7} {'Final':>12}")
@@ -831,7 +831,7 @@ def main():
 
     for risk, maxlot in [(0.5, 0.10), (1.0, 0.20), (1.5, 0.30), (2.0, 0.50),
                           (2.5, 0.50), (3.0, 0.75), (3.5, 1.00)]:
-        cfg = make_v14_config(risk, maxlot)
+        cfg = make_v15_config(risk, maxlot)
         ind = precompute_indicators(h4_df, cfg)
         trades, eq, final = backtest_goldalpha(*ind, cfg)
         m = calc_metrics(trades, cfg.INITIAL_BALANCE, total_days)
@@ -847,7 +847,7 @@ def main():
     print("\n" + "=" * 70)
     print("Year-by-Year (Risk=3.0%, MaxLot=0.75)")
     print("=" * 70)
-    cfg = make_v14_config(3.0, 0.75)
+    cfg = make_v15_config(3.0, 0.75)
     ind = precompute_indicators(h4_df, cfg)
     trades, eq, final = backtest_goldalpha(*ind, cfg)
     df = pd.DataFrame(trades)
@@ -870,7 +870,7 @@ def main():
     print("=" * 70)
 
     for risk, maxlot, label in [(0.5, 0.10, "Low"), (3.0, 0.75, "Target")]:
-        cfg = make_v14_config(risk, maxlot)
+        cfg = make_v15_config(risk, maxlot)
         n_windows = 8
         window_size = total_bars // n_windows
         oos_size = int(window_size * 0.25)
@@ -912,7 +912,7 @@ def main():
     print("OOS Performance (2024-2026, trained on 2016-2023)")
     print("=" * 70)
     for risk, maxlot in [(2.0, 0.50), (3.0, 0.75)]:
-        cfg = make_v14_config(risk, maxlot)
+        cfg = make_v15_config(risk, maxlot)
         mask = h4_df.index >= "2022-01-01"
         sub = h4_df[mask].copy()
         ind = precompute_indicators(sub, cfg)
@@ -928,18 +928,19 @@ def main():
                   f"Daily={m['daily_jpy']:.0f} JPY")
 
     print("\n" + "=" * 70)
-    print("SUMMARY: GoldAlpha v14")
+    print("SUMMARY: GoldAlpha v15")
     print("=" * 70)
     print("  Parameters:")
-    print("    Entry: BodyRatio=0.34, EMA_Zone=0.40, ATR_Filter=0.35")
-    print("    D1_Tol=0.003, MaxPositions=3")
-    print("    Exit: SL=2.5, Trail=3.5, BE=1.5")
-    print("    New: Structure(3-bar HH/HL), TimeDecay(30 H4 bars)")
+    print("    Entry: BodyRatio=0.34, EMA_Zone=0.60, ATR_Filter=0.25")
+    print("    D1_Tol=0.003, MaxPositions=4")
+    print("    Exit: SL=3.0, Trail=3.0, BE=1.0")
+    print("    Features: Structure(2-bar HH/HL), TimeDecay(30 H4 bars)")
     print("  Full period (2016-2026):")
-    print("    1212 trades, PF=1.68 (low risk), PF=2.75 (3% risk)")
-    print("    Daily=7664 JPY at 3% risk, DD=77%")
-    print("  OOS 2024-2026: PF=3.43, Daily=9359 JPY at 2% risk")
-    print("  WFA: 4/8 (trend-following, fails in ranging markets)")
+    print("    1625 trades, PF=1.83 (low risk), DD=33.4%")
+    print("    At 2.5% risk: Daily=7415 JPY, DD=68.2%")
+    print("  OOS 2024-2026: PF=2.88, Daily=2085 JPY at 1% risk")
+    print("  OOS 2024-2026: PF=3.76, Daily=5044 JPY at 1.5% risk")
+    print("  WFA: 3/8 (trend-following, fails in ranging markets)")
 
 
 if __name__ == "__main__":

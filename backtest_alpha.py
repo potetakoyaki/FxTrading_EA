@@ -1,6 +1,6 @@
 """
 backtest_alpha.py -- GoldAlpha strategy backtester
-Replicates GoldAlpha v12/v6 MQL5 logic exactly in Python.
+Replicates GoldAlpha v15 MQL5 logic in Python.
 Supports parameter grid search, WFA, and JPY profitability calculation.
 """
 
@@ -29,18 +29,18 @@ class AlphaConfig:
     ATR_Period: int = 14
     ATR_SMA: int = 50
 
-    # Risk / Exit (v13 optimized)
-    SL_ATR_Mult: float = 2.5
-    Trail_ATR: float = 3.5
-    BE_ATR: float = 1.5
-    RiskPct: float = 2.5
+    # Risk / Exit (v15 optimized)
+    SL_ATR_Mult: float = 3.0
+    Trail_ATR: float = 3.0
+    BE_ATR: float = 1.0
+    RiskPct: float = 1.5
     BodyRatio: float = 0.34
 
-    # Entry Filters (v13 optimized)
-    EMA_Zone_ATR: float = 0.40
-    ATR_Filter: float = 0.35
+    # Entry Filters (v15 optimized)
+    EMA_Zone_ATR: float = 0.60
+    ATR_Filter: float = 0.25
     D1_Tolerance: float = 0.003
-    MaxPositions: int = 3
+    MaxPositions: int = 4
 
     # Lot
     MinLot: float = 0.01
