@@ -2,8 +2,9 @@
 //| GoldAlpha_v27.mq5 - High-Freq v12 Dip-Buy + Smart Filters      |
 //| v12 base + D1 regime + W1 sep + EMA slope + Time Decay           |
 //|                                                                  |
-//| Optimization results (Python backtest, 10yr):                    |
-//|   PF=2.23, T=554, WFA 5/8, DD=23.2%, WR=61.7%                  |
+//| Optimization results (Python backtest):                          |
+//|   10yr: PF=2.23, T=554, WFA 5/8, DD=23.2%                      |
+//|   2024+: PF=3.98, T=166, DD=9%(1%R)/21%(3%R), D=¥7348@3%       |
 //| Key improvements over v12:                                       |
 //|   - D1 slope filter: skip flat D1 EMA (ranging markets)          |
 //|   - W1 EMA separation: skip weak W1 trends                      |
@@ -31,7 +32,7 @@ input int      ATR_SMA       = 50;
 input double   SL_ATR_Mult   = 3.0;
 input double   Trail_ATR     = 3.5;
 input double   BE_ATR        = 1.0;
-input double   RiskPct       = 1.0;   // Higher than v26 for JPY daily target
+input double   RiskPct       = 3.0;   // 2024+ Gold: 3%=¥7348/day, DD=21%
 input double   BodyRatio     = 0.32;
 
 // --- Entry Filters ---
@@ -55,7 +56,7 @@ input int      Max_Hold_Bars  = 30;     // Close after this many H4 bars
 
 // --- General ---
 input double   MinLot        = 0.01;
-input double   MaxLot        = 0.50;
+input double   MaxLot        = 1.50;
 input int      MagicNumber   = 330027;
 
 CTrade trade;
