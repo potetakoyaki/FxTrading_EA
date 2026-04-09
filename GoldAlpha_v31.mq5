@@ -1,20 +1,12 @@
 //+------------------------------------------------------------------+
-//| GoldAlpha_v30.mq5 - Adaptive MaxPos + Progressive Trail          |
-//| v29 base + two architectural enhancements:                       |
-//|   1. Adaptive MaxPositions: MaxPos=3 in strong D1 only           |
-//|   2. Progressive Trail: tighter trail as profit grows            |
-//|                                                                  |
-//| MT5 Backtest Results (USD $10K, R=0.2%, 2016-2026):              |
-//|   PF=2.03, T=871, DD=7.58%, Sharp=1.69                          |
-//|   vs v29: +200 trades (+30%), DD -13.6pp, Sharp +0.19            |
-//|   WFA 5/5: 1.02, 1.15, 1.49, 1.63, 2.03                        |
-//|   Sensitivity 12/12 PASS (PF range 1.97-2.10 at +/-20%)         |
-//|                                                                  |
-//| OOS 2024-2026 (R=1.0%): PF=1.88, T=270, $392K profit            |
-//| Production: R=1.0%, MaxLot=1.00, JPY 300K -> ~5000+/day          |
+//| GoldAlpha_v31.mq5 - v30 + ATR-based TP + Stricter Vol Filter     |
+//| v30 base (Adaptive MaxPos + Progressive Trail) +                 |
+//|   1. ATR-based TP: capture profits in ranging markets            |
+//|   2. ATR_Filter 0.55->0.66: filter low-vol entries              |
+//|   3. Adaptive TP: wider TP in strong trends                     |
 //+------------------------------------------------------------------+
 #property copyright "Test"
-#property version   "30.00"
+#property version   "31.00"
 #property strict
 #include <Trade\Trade.mqh>
 
@@ -36,7 +28,7 @@ input double   RiskPct       = 1.0;
 // --- Entry Filters ---
 input double   BodyRatio     = 0.32;
 input double   EMA_Zone_ATR  = 0.50;
-input double   ATR_Filter    = 0.55;
+input double   ATR_Filter    = 0.66;
 input double   D1_Tolerance  = 0.003;
 input int      MaxPositions  = 2;
 
@@ -70,12 +62,15 @@ input bool     CheckBar3Strong  = true;  // Check bar 3 in very strong D1
 // --- Adaptive MaxPositions ---
 input bool     UseAdaptiveMaxPos = true;   // Enable adaptive max positions
 input int      MaxPos_Strong     = 3;    // MaxPositions in strong D1 regime
-input int      MaxPos_Weak       = 2;    // MaxPositions in weak D1 regime
+
+// --- ATR-based Take Profit (NEW) ---
+input double   TP_ATR_Mult      = 4.0;    // TP in ATR multiples (0=disabled)
+input double   TP_Strong_Mult   = 5.0;    // TP in strong D1 (wider, let trends run)
 
 // --- General ---
 input double   MinLot        = 0.01;
 input double   MaxLot        = 1.00;
-input int      MagicNumber   = 330030;
+input int      MagicNumber   = 330031;
 
 CTrade trade;
 int hW1Fast, hW1Slow, hD1EMA, hH4EMA, hATR;
@@ -240,15 +235,10 @@ void OnTick()
    if(d1slope < D1_Min_Slope) return;
    bool isStrong = (d1slope >= D1_Strong_Slope);
 
-   // Adaptive MaxPositions: Strong D1 -> MaxPos_Strong, Weak D1 -> MaxPos_Weak
+   // Adaptive MaxPositions: allow 3rd position only in strong D1 regime
    int effectiveMaxPos = MaxPositions;
-   if(UseAdaptiveMaxPos)
-   {
-      if(isStrong)
-         effectiveMaxPos = MaxPos_Strong;
-      else
-         effectiveMaxPos = MaxPos_Weak;
-   }
+   if(UseAdaptiveMaxPos && isStrong)
+      effectiveMaxPos = MaxPos_Strong;
    if(pc >= effectiveMaxPos) return;
 
    // W1 trend direction
@@ -319,13 +309,25 @@ void OnTick()
    if(buySignal)
    {
       double sd=slMult*av;
-      trade.Buy(CalcLot(sd),_Symbol,ask,NormalizeDouble(ask-sd,_Digits),0,"A30 BUY");
+      double tp=0;
+      if(TP_ATR_Mult>0)
+      {
+         double tpMult = isStrong ? TP_Strong_Mult : TP_ATR_Mult;
+         tp = NormalizeDouble(ask + tpMult * av, _Digits);
+      }
+      trade.Buy(CalcLot(sd),_Symbol,ask,NormalizeDouble(ask-sd,_Digits),tp,"A31 BUY");
       lastEntryTime = TimeCurrent();
    }
    if(sellSignal)
    {
       double sd=slMult*av;
-      trade.Sell(CalcLot(sd),_Symbol,bid,NormalizeDouble(bid+sd,_Digits),0,"A30 SELL");
+      double tp=0;
+      if(TP_ATR_Mult>0)
+      {
+         double tpMult = isStrong ? TP_Strong_Mult : TP_ATR_Mult;
+         tp = NormalizeDouble(bid - tpMult * av, _Digits);
+      }
+      trade.Sell(CalcLot(sd),_Symbol,bid,NormalizeDouble(bid+sd,_Digits),tp,"A31 SELL");
       lastEntryTime = TimeCurrent();
    }
 }
