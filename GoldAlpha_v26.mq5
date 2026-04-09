@@ -57,8 +57,35 @@ int CountPositions()
 { int c=0; for(int i=PositionsTotal()-1;i>=0;i--) if(PositionGetSymbol(i)==_Symbol&&PositionGetInteger(POSITION_MAGIC)==MagicNumber)c++; return c; }
 
 double CalcLot(double sd)
-{ double eq=AccountInfoDouble(ACCOUNT_EQUITY),rm=eq*RiskPct/100,tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE),ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-  if(tv<=0||ts<=0||sd<=0)return MinLot; double l=rm/(sd/ts*tv); l=MathFloor(l/0.01)*0.01; return MathMax(MinLot,MathMin(MaxLot,l)); }
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   double rm = eq * RiskPct / 100.0;
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tv <= 0 || ts <= 0 || sd <= 0) return MinLot;
+
+   // For JPY accounts: verify tick_value is in account currency
+   // XAUUSD tick_value from MT5 should auto-convert to account currency
+   // Fallback: if account is JPY and tv seems USD-denominated (< 10), convert
+   string acctCcy = AccountInfoString(ACCOUNT_CURRENCY);
+   if(acctCcy == "JPY" && tv < 10.0)
+   {
+      // tv is likely in USD, convert to JPY using USDJPY
+      double usdjpy = 0;
+      if(SymbolInfoDouble("USDJPY", SYMBOL_BID) > 0)
+         usdjpy = SymbolInfoDouble("USDJPY", SYMBOL_BID);
+      else
+         usdjpy = 150.0;  // Fallback rate
+      tv *= usdjpy;
+   }
+
+   double ticks = sd / ts;
+   double riskPerLot = ticks * tv;
+   if(riskPerLot <= 0) return MinLot;
+   double l = rm / riskPerLot;
+   l = MathFloor(l / 0.01) * 0.01;
+   return MathMax(MinLot, MathMin(MaxLot, l));
+}
 
 double GetAvgATR()
 { double b[]; if(CopyBuffer(hATR,0,1,ATR_SMA+1,b)<ATR_SMA+1)return -1; double s=0; for(int i=0;i<ATR_SMA;i++)s+=b[i]; return s/ATR_SMA; }
