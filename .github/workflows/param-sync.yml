@@ -1,0 +1,62 @@
+name: Parameter Sync Check
+on:
+  push:
+    paths:
+      - '*.mq5'
+      - '*.py'
+      - 'Include/*.mqh'
+  pull_request:
+
+jobs:
+  sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check Parameter Sync
+        run: |
+          python -c "
+          import re, sys
+
+          # Read Python config
+          with open('backtest_gold.py') as f:
+              py = f.read()
+
+          # Read MQL5 config
+          with open('AntigravityMTF_EA_Gold_v17.mq5') as f:
+              mq = f.read()
+
+          # Key parameters to check
+          checks = {
+              'SL_ATR': (r'SL_ATR_MULTI\s*=\s*([\d.]+)', r'SL_ATR_Multi\s*=\s*([\d.]+)'),
+              'TP_ATR': (r'TP_ATR_MULTI\s*=\s*([\d.]+)', r'TP_ATR_Multi\s*=\s*([\d.]+)'),
+              'BE_ATR': (r'BE_ATR_MULTI\s*=\s*([\d.]+)', r'BE_ATR_Multi\s*=\s*([\d.]+)'),
+              'MIN_SCORE': (r'MIN_SCORE\s*=\s*(\d+)', r'MinEntryScore\s*=\s*(\d+)'),
+              'COOLDOWN': (r'COOLDOWN_MINUTES\s*=\s*(\d+)', r'CooldownMinutes\s*=\s*(\d+)'),
+          }
+
+          mismatches = []
+          for name, (py_re, mq_re) in checks.items():
+              py_m = re.search(py_re, py)
+              mq_m = re.search(mq_re, mq)
+              if py_m and mq_m:
+                  py_val = float(py_m.group(1))
+                  mq_val = float(mq_m.group(1))
+                  if abs(py_val - mq_val) > 0.001:
+                      mismatches.append(f'{name}: Python={py_val} MQL5={mq_val}')
+                      print(f'MISMATCH {name}: Python={py_val} vs MQL5={mq_val}')
+                  else:
+                      print(f'OK {name}: {py_val}')
+              else:
+                  print(f'SKIP {name}: pattern not found')
+
+          if mismatches:
+              print(f'\nFAIL: {len(mismatches)} parameter mismatch(es)')
+              sys.exit(1)
+          print('\nPASS: All parameters in sync')
+          "

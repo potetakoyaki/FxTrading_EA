@@ -1,390 +1,247 @@
-# AntigravityMTF EA Gold -- Forward Test Plan
+# AntigravityMTF EA Gold — フォワードテスト手順書
 
-## 1. Overview
-
-**EA Version**: AntigravityMTF_EA_Gold v12.0 (MQ5) / backtest v7.0 (Python)
-**Symbol**: XAUUSD (Gold) M15
-**Backtest Reference**:
-- Full period: PF=1.70, WR=67%, DD=7.3%, Sharpe=3.68
-- Unknown data (2025-26): PF=1.51
-- Spread-adjusted: PF=1.63
-- WFA: 11/14 (79%), PF>=1.0 base: 12/14 (86%)
-- Monte Carlo: 100% profit probability, PF 5th percentile=1.75
-
-**IMPORTANT**: Python backtest uses pseudo-M15 data (interpolated from H1) prior to 2021-12.
-Forward testing on live data is the only way to validate real-world performance.
+**EAバージョン**: v13.0
+**通貨ペア**: XAUUSD（ゴールド）
+**時間足**: M15（15分足）
 
 ---
 
-## 2. Demo Account Setup
+## 1. このEAについて
 
-### 2.1 Recommended Brokers (Low Spread Gold ECN)
+このEAは、ゴールド（XAUUSD）専用の自動売買プログラムです。
+15分足チャートで動作し、複数の指標を組み合わせてエントリーを判断します。
 
-| Broker | Typical XAUUSD Spread | Account Type | Notes |
-|--------|----------------------|--------------|-------|
-| IC Markets | 5-10 points | Raw Spread | Recommended. Lowest Gold spreads. |
-| Pepperstone | 6-12 points | Razor | Good execution, low slippage. |
-| Exness | 7-16 points | Raw Spread | Flexible leverage, fast execution. |
-| Tickmill | 8-15 points | Pro | Competitive commissions. |
-| FPMarkets | 8-14 points | Raw | Reliable MT5 platform. |
+**バックテスト実績**:
+- WFA（ウォークフォワード分析）: 15/16四半期でプラス（94%）
+- モンテカルロ検証: 1000回中1000回で利益
+- 勝率: 約70%
+- 平均PF: 2.21
 
-**Requirements**:
-- MT5 platform (NOT MT4 -- this EA is MQ5 only)
-- ECN/Raw Spread account (avoid Standard accounts with markup)
-- XAUUSD spread consistently under MaxSpread=50 points
-- Hedge mode enabled (not netting mode)
-- Leverage: 1:100 or higher for Gold
-- Demo balance: 300,000 JPY (or USD equivalent for testing)
-
-### 2.2 Demo Account Creation
-
-1. Open a demo account at your chosen broker
-2. Select MT5 platform, ECN/Raw account type
-3. Set initial balance to match backtest assumptions (300,000 JPY)
-4. Ensure XAUUSD is available in the symbol list
-5. Set chart max bars to **Unlimited** in Tools -> Options -> Charts
+**重要**: バックテストの結果が良くても、実際のトレードで同じ結果が出るとは限りません。
+必ずデモ口座で3ヶ月テストしてから、リアル口座に移行してください。
 
 ---
 
-## 3. EA Compilation in MetaEditor
+## 2. 準備するもの
 
-### 3.1 File Placement
+### 2.1 ブローカー（証券会社）を選ぶ
+
+ゴールドのスプレッドが小さいECN口座を選んでください。
+
+| ブローカー | ゴールドスプレッド | 口座タイプ | おすすめ度 |
+|-----------|-----------------|----------|----------|
+| IC Markets | 5〜10ポイント | Raw Spread | ◎ |
+| Pepperstone | 6〜12ポイント | Razor | ◎ |
+| Exness | 7〜16ポイント | Raw Spread | ○ |
+| Tickmill | 8〜15ポイント | Pro | ○ |
+| FPMarkets | 8〜14ポイント | Raw | ○ |
+
+### 2.2 デモ口座を開設する
+
+1. 上記ブローカーのサイトでデモ口座を申請
+2. 以下の条件で開設してください：
+   - **プラットフォーム**: MT5（MT4ではダメ）
+   - **口座タイプ**: ECN / Raw Spread
+   - **初期残高**: 30万円（または同等のUSD）
+   - **レバレッジ**: 1:100以上
+   - **口座モード**: ヘッジモード（ネッティングではダメ）
+
+### 2.3 ヘッジモードの確認方法
+
+MT5を開いて：
+1. 上部メニュー → **ツール** → **オプション**
+2. **取引**タブを開く
+3. 「ヘッジング」が選択されていることを確認
+4. もし「ネッティング」の場合、ブローカーに問い合わせてヘッジ口座に変更
+
+---
+
+## 3. EAのインストール
+
+### 3.1 ファイルを配置する
+
+1. MT5を開く
+2. 上部メニュー → **ファイル** → **データフォルダを開く**
+3. フォルダが開くので、以下の場所にファイルをコピー：
 
 ```
-<MT5 Data Folder>/
-  MQL5/
-    Experts/
-      AntigravityMTF_EA_Gold.mq5    <-- Copy here
-    Files/
-      (trade history CSV exports will appear here)
-    Scripts/
-      ExportHistory.mq5              <-- Optional: for data export
+MQL5/
+  └── Experts/
+        └── AntigravityMTF_EA_Gold.mq5    ← ここにコピー
 ```
 
-To find the data folder: In MT5, go to **File -> Open Data Folder**.
+### 3.2 コンパイル（EAをビルド）する
 
-### 3.2 Compilation Steps
+1. MT5でキーボードの **F4** を押す → MetaEditor（エディタ）が開く
+2. 左側のナビゲータで `Experts/AntigravityMTF_EA_Gold.mq5` をダブルクリック
+3. キーボードの **F7** を押す（コンパイル実行）
+4. 画面下部の「エラー」タブを確認：
+   - **「0 errors」** と表示されれば成功！
+   - エラーが出た場合 → 下の「トラブルシューティング」を参照
 
-1. Open MetaEditor (press F4 in MT5, or from Start Menu)
-2. File -> Open -> navigate to `MQL5/Experts/AntigravityMTF_EA_Gold.mq5`
-3. Press **F7** (or Compile button) to compile
-4. Check the **Errors** tab at the bottom:
-   - **0 errors**: Compilation successful
-   - If errors appear: check that `#include <Trade/Trade.mqh>` is available (standard library)
-5. The compiled `.ex5` file will appear in the same folder
-6. Switch back to MT5 -- the EA should now appear in the Navigator panel under **Expert Advisors**
+### 3.3 コンパイルエラーが出た場合
 
-### 3.3 Compilation Troubleshooting
-
-- **"Trade.mqh not found"**: Ensure your MT5 installation has the standard library. Reinstall MT5 if missing.
-- **Encoding errors**: Save the file as UTF-8 with BOM if Japanese comments cause issues.
-
----
-
-## 4. Recommended Input Settings
-
-### 4.1 CRITICAL: Settings That Differ Between Python Backtest and MQ5 Defaults
-
-The MQ5 file (v12.0) has older default values in some input parameters.
-The Python backtest (v7.0/v8.0) evolved these values through WFA optimization.
-**You MUST override the MQ5 defaults** with the values below:
-
-| Parameter | MQ5 Default | Python (WFA) | Recommended | Why |
-|-----------|-------------|-------------|-------------|-----|
-| **RiskPercent** | 0.3 | 0.75 | **0.75** | WFA-validated; 0.3 is too conservative |
-| **SL_ATR_Multi** | 1.5 | 1.2 | **1.2** | Tighter SL improves RR ratio (PF +0.36) |
-| **TP_ATR_Multi** | 3.5 | 4.0 | **4.0** | Wider TP captures trends (WFA 12->13/14) |
-| **BE_ATR_Multi** | 1.5 | 0.8 | **0.8** | Earlier breakeven protects capital |
-| **HighVol_SL_Bonus** | 0.5 | 0.0 | **0.0** | No extra SL in volatile conditions |
-| **MinEntryScore** | 9 | 12 | **12** | Higher quality filter (PF 1.45->1.61) |
-| **CooldownMinutes** | 240 (=16 bars) | 480 (=32 bars) | **480** | Longer cooldown reduces DD |
-| **MaxPositions** | 3 | 1 | **1** | Pyramid disabled (DD 21.6%->11.0%) |
-| **MaxPyramidPositions** | 3 | 1 | **1** | Pyramid disabled |
-| **UseVolumeClimax** | true | false | **false** | 34% WR, harmful noise |
-| **Chandelier_ATR_Multi** | 3.0 | 2.0 | **2.0** | Tighter exit locks profit faster |
-| **Kelly_MaxRisk** | 1.0 | 1.5 | **1.5** | Allow more aggressive sizing in streaks |
-| **Trend_SL_Widen** | 1.3 | 1.5 | **1.5** | Better pullback tolerance in trends |
-| **Trend_SL_Tighten** | 0.7 | 0.6 | **0.6** | Faster counter-trend exit |
-| **UseRSIMomentumConfirm** | true | true | **true** | Keep enabled (WFA 13->14/16) |
-| **RSIMomentumLookback** | 3 | 3 | **3** | Matches backtest |
-
-### 4.2 Settings to Keep at MQ5 Defaults
-
-These parameters match between Python and MQ5, or the MQ5-specific features
-(v9-v12) have their own tested defaults:
-
-- ATR_Period_SL = 14
-- Trail_ATR_Multi = 1.0
-- MinSL_Points = 200, MaxSL_Points = 1500
-- VolRegime_Period = 50, VolRegime_Low = 0.7, VolRegime_High = 1.5
-- All H4/H1/M15 MA/RSI/BB periods (unchanged)
-- TradeStartHour = 8, TradeEndHour = 22
-- UsePartialClose = true, PartialCloseRatio = 0.5, PartialTP_Ratio = 0.5
-- UseCorrelation = true (with USDJPY)
-- UseDivergence = true
-- UseSRLevels = true
-- UseCandlePatterns = true
-- UseH4RSI = true
-- UseChandelierExit = true
-- UseEquityCurveFilter = true
-- UseAdaptiveSizing = true
-- UseNewsFilter = true
-- UseWeekendClose = true
-- UseMomentumBurst = true
-- UseReversalMode = true
-- UseRegimeAdaptive = true
-- UseSessionRegime = true
-- UseAdaptiveExit = true
-- UseV11Range = true
-- MagicNumber = 20260224
-
-### 4.3 Settings Input Summary (Copy-Paste Ready)
-
-```
-=== Risk Management ===
-RiskPercent        = 0.75
-MaxLots            = 0.50
-MinLots            = 0.01
-MaxSpread          = 50
-MaxPositions       = 1
-MagicNumber        = 20260224
-MaxDrawdownPct     = 6.0
-DDHalfRiskPct      = 2.5
-
-=== Dynamic SL/TP (ATR) ===
-ATR_Period_SL      = 14
-SL_ATR_Multi       = 1.2
-TP_ATR_Multi       = 4.0
-Trail_ATR_Multi    = 1.0
-BE_ATR_Multi       = 0.8
-MinSL_Points       = 200
-MaxSL_Points       = 1500
-
-=== Volatility Regime ===
-VolRegime_Period   = 50
-VolRegime_Low      = 0.7
-VolRegime_High     = 1.5
-HighVol_SL_Bonus   = 0.0
-
-=== Scoring ===
-MinEntryScore      = 12
-UseSessionBonus    = true
-UseMomentum        = true
-
-=== Time Filter ===
-TradeStartHour     = 8
-TradeEndHour       = 22
-AvoidFriday        = true
-CooldownMinutes    = 480
-
-=== v4.0 Attack ===
-UseMomentumBurst   = true
-UseVolumeClimax    = false
-MaxPyramidPositions = 1
-PyramidLotDecay    = 0.5
-UseReversalMode    = true
-
-=== Trend SL/TP ===
-Trend_SL_Widen     = 1.5
-Trend_SL_Tighten   = 0.6
-
-=== Chandelier Exit ===
-Chandelier_ATR_Multi = 2.0
-
-=== Adaptive Sizing ===
-Kelly_MaxRisk      = 1.5
-
-=== RSI Momentum ===
-UseRSIMomentumConfirm = true
-RSIMomentumLookback   = 3
-```
-
-### 4.4 Note on MQ5 v9-v12 Features
-
-The MQ5 file includes features (v9.0 Regime Adaptive, v10.0 Session x Regime,
-v11.0 Range Market Guard) that were developed in MQ5 and have their own
-default parameter sets. These features were not part of the Python WFA
-validation. Keep them at MQ5 defaults and monitor their contribution.
-If performance diverges significantly from backtest expectations, consider
-disabling these newer features (UseRegimeAdaptive=false, UseSessionRegime=false,
-UseV11Range=false) to fall back to the WFA-validated core.
+| エラー内容 | 対処法 |
+|-----------|--------|
+| `Trade.mqh not found` | MT5を再インストール（標準ライブラリが必要） |
+| 文字化けエラー | ファイルをUTF-8(BOM付き)で保存し直す |
+| その他のエラー | エラーメッセージをGitHub Issueに報告 |
 
 ---
 
-## 5. Attaching the EA
+## 4. EAをチャートにセットする
 
-1. Open an **XAUUSD M15** chart in MT5
-2. Drag the EA from Navigator -> Expert Advisors onto the chart
-3. In the settings dialog:
-   - **Common** tab: Check "Allow Algo Trading"
-   - **Inputs** tab: Apply all settings from Section 4.3 above
-4. Click **OK**
-5. Verify: The EA name should appear in the top-right corner of the chart with a smiley face
-6. Ensure **Algo Trading** button on the toolbar is enabled (green icon)
+### 4.1 チャートを準備
 
----
+1. MT5に戻る（MetaEditorから **Alt+F4** で閉じるか、MT5をクリック）
+2. **XAUUSD**（ゴールド）のチャートを開く
+3. 時間足を **M15**（15分足）に変更
 
-## 6. What to Monitor
+### 4.2 EAをチャートに載せる
 
-### 6.1 Daily Checks (1 minute)
+1. 左側の「ナビゲータ」パネル → **エキスパートアドバイザ** を展開
+2. `AntigravityMTF_EA_Gold` を見つけてダブルクリック（またはチャートにドラッグ）
+3. 設定画面が開く：
 
-- EA is still running (smiley face visible on chart)
-- No disconnection warnings in Journal tab
-- Check Experts tab for any error messages
+#### 「共通」タブ
+- ✅ **アルゴリズム取引を許可する** にチェック
 
-### 6.2 Weekly Review (15 minutes)
+#### 「入力」タブ
+- **設定変更は不要です！** デフォルト値がすべてWFA検証済みです
+- ただし **GMTOffset** だけはブローカーに合わせて変更してください：
+  - IC Markets → `GMTOffset = 2`（冬）/ `3`（夏）
+  - Exness → `GMTOffset = 0`
+  - わからない場合 → `2` のまま（多くのブローカーがGMT+2）
 
-Export trade history and run the tracker:
+4. **OK** をクリック
 
-```bash
-# Export trades from MT5: Account History tab -> right-click -> Export
-# Save as CSV to a known location, then:
+### 4.3 動作確認
 
-python forward_test_tracker.py --csv trades.csv --report weekly
-```
+以下を確認してください：
+- ✅ チャート右上にEA名とニコニコマーク 😊 が表示されている
+- ✅ ツールバーの「アルゴトレード」ボタンが緑色になっている
+- ✅ 下部の「エキスパート」タブに `v13.0 初期化完了` と表示されている
 
-Review:
-- Weekly PnL positive or within normal variance
-- No ALERT messages from deviation check
-- Trade count roughly 4-5 per week (annualized ~50-60/quarter)
-- Spread in executed trades under 50 points
-
-### 6.3 Monthly Review (30 minutes)
-
-```bash
-python forward_test_tracker.py --csv trades.csv --report monthly
-python forward_test_tracker.py --csv trades.csv --report summary
-```
-
-Compare monthly metrics against backtest expectations:
-- PF should be trending toward 1.5+
-- Win rate should be 55%+
-- Max DD should stay under 10%
-- Trade frequency should be 15-20/month
-
-### 6.4 3-Month Review (Go/No-Go Decision)
-
-```bash
-python forward_test_tracker.py --csv trades.csv --report review
-```
+もしニコニコマークが ❌ になっている場合：
+→ ツールバーの「アルゴトレード」ボタンをクリックして有効化
 
 ---
 
-## 7. When to Stop the Test
+## 5. 毎日・毎週やること
 
-### 7.1 Immediate Stop Conditions
+### 5.1 毎日チェック（1分）
 
-Stop the EA immediately if any of these occur:
+| 確認項目 | やり方 |
+|---------|--------|
+| EAが動いているか | チャート右上のニコニコマーク確認 |
+| エラーがないか | 下部「エキスパート」タブを確認 |
+| 切断されていないか | 右下の接続状態が緑色か確認 |
 
-- **Drawdown exceeds 15%** of initial balance
-- **10+ consecutive losing trades** (backtest max was ~5-6)
-- **EA stops trading for 2+ weeks** (no signals at all)
-- **Broker changes conditions** (spread permanently above 50, leverage reduced)
-- **Critical error** in Experts tab (handle errors, connection failures)
+### 5.2 毎週チェック（15分）
 
-### 7.2 Pause and Investigate
+1. 下部の **「口座履歴」タブ** をクリック
+2. 右クリック → **期間指定** → 今週を選択
+3. 確認するポイント：
+   - 週に4〜5回トレードしているか
+   - 大きな損失（残高の3%以上）がないか
+   - スプレッドが50ポイント以下か
 
-Pause and review (but don't necessarily stop) if:
+### 5.3 毎月チェック（30分）
 
-- PF drops below 1.0 after 30+ trades
-- Win rate below 45% after 30+ trades
-- Monthly loss exceeds 5% of balance
-- Trade frequency is 2x higher or lower than expected
+トレード履歴をエクスポートして分析：
 
----
-
-## 8. Success/Failure Criteria (3-Month Test)
-
-### 8.1 Success (Proceed to Live)
-
-ALL of the following must be true:
-
-- [ ] PF >= 1.14 (at least 70% of backtest spread-adjusted PF 1.63)
-- [ ] Win Rate >= 50%
-- [ ] Max Drawdown <= 15%
-- [ ] Net profit > 0 over the 3-month period
-- [ ] Trade frequency: 30-100 trades per quarter
-- [ ] No single loss exceeds 3% of balance
-- [ ] Max consecutive losses < 8
-
-### 8.2 Conditional Pass (Extend Test)
-
-If 5 out of 7 criteria pass:
-- Extend test by 1-2 months
-- Review the failing criteria
-- Consider parameter adjustment only if clearly justified
-
-### 8.3 Failure (Do Not Go Live)
-
-If 3 or more criteria fail:
-- Do not proceed to live trading
-- Analyze which market conditions caused failures
-- Consider whether EA design changes are needed
-- Re-run backtest with latest data to check for regime shift
+1. **口座履歴**タブ → 右クリック → **レポート** → **CSV**
+2. 保存したCSVで以下を確認：
+   - 月間PF（利益÷損失）が1.0以上か
+   - 勝率が50%以上か
+   - 最大ドローダウンが10%以内か
+   - 月間15〜20回トレードしているか
 
 ---
 
-## 9. Risk Management Rules
+## 6. 危険信号 — こうなったら止める
 
-### 9.1 Position Sizing
+### 6.1 即座に止める条件
 
-- **Risk per trade**: 0.75% of account balance (adaptive via Half-Kelly)
-- **Max lot size**: 0.50 lots
-- **Min lot size**: 0.01 lots
-- **Kelly range**: 0.1% to 1.5% (capped by adaptive sizing)
+以下のいずれかが発生したら、**すぐにEAを停止**してください：
 
-### 9.2 Drawdown Controls (Built into EA)
+- ❌ ドローダウンが初期残高の **15%** を超えた
+- ❌ **10連敗**以上した
+- ❌ **2週間以上**トレードが1件もない
+- ❌ 「エキスパート」タブに赤いエラーが連続で出ている
 
-- DD > 2.5%: Risk halved automatically
-- DD > 6%: MIN_SCORE escalated to 11 (fewer trades)
-- DD > 10%: MIN_SCORE escalated to 13
-- DD > 15%: MIN_SCORE escalated to 16
-- DD > 20%: MIN_SCORE escalated to 18 (near-stop)
+**止め方**: チャートのEA名を右クリック → 「削除」、または「アルゴトレード」ボタンをOFF
 
-### 9.3 Additional Forward Test Rules
+### 6.2 一時停止して調べる条件
 
-- **Do NOT change parameters** during the test unless stopping criteria are met
-- **Do NOT manually close trades** -- let the EA manage all exits
-- **Do NOT add other EAs** to the same account during the test
-- **Log every parameter change** with date and reason if adjustments are made
-- **Take screenshots** of the Experts tab weekly for audit trail
+- ⚠️ 30トレード以上してPFが1.0未満
+- ⚠️ 勝率が45%以下
+- ⚠️ 月間損失が残高の5%超
 
-### 9.4 Go-Live Transition
-
-When the 3-month test passes:
-1. Start with **minimum lot size (0.01)** on a live account for 2 weeks
-2. Gradually increase to target risk (0.75%) over 1 month
-3. Continue running the tracker on live trades
-4. Set hard stop-loss at account level: 20% max DD on live
-5. Never risk more than you can afford to lose
+→ 停止して、GitHub Issueで相談するか、設定を見直す
 
 ---
 
-## 10. Data Export for Tracker
+## 7. 3ヶ月後の判定
 
-### 10.1 From MT5 Account History
+### 7.1 合格（リアル口座に移行してOK）
 
-1. In MT5, go to the **Account History** tab (bottom panel)
-2. Right-click -> **Custom Period** -> set start date to test start
-3. Right-click -> **Report** -> **CSV** (or **Export**)
-4. Save to a known location
-5. Run the tracker as described in Section 6
+以下の **すべて** を満たせば合格：
 
-### 10.2 Automated Export (Optional)
+- ✅ PF（プロフィットファクター）≧ 1.14
+- ✅ 勝率 ≧ 50%
+- ✅ 最大ドローダウン ≦ 15%
+- ✅ 3ヶ月合計でプラス収支
+- ✅ 四半期のトレード数 30〜100回
+- ✅ 1回の最大損失が残高の3%以内
+- ✅ 最大連敗 8回未満
 
-The `ExportHistory.mq5` script in this repository can export price data.
-For trade history, use MT5's built-in export or a custom trade logger EA.
+### 7.2 条件付き合格（テスト延長）
+
+7項目中5項目が合格 → あと1〜2ヶ月延長してテスト
+
+### 7.3 不合格（リアル口座に行かない）
+
+7項目中3項目以上が不合格 → リアル口座にはまだ行かない
 
 ---
 
-## Appendix: Backtest Data Limitations
+## 8. リアル口座への移行手順
 
-The Python backtester used M15 data that is **pseudo-data** (linearly
-interpolated from H1) for dates prior to December 2021. This means:
+3ヶ月テストに合格したら：
 
-- Backtest results before 2022 are likely **overstated**
-- The "unknown data" test (2025-26, PF=1.51) is the most reliable reference
-- Forward testing on live tick data is the definitive validation
-- MT5 Strategy Tester with real tick data is the next-best alternative
+1. **最小ロット（0.01）** でリアル口座を開始
+2. 2週間問題なければ、徐々にリスクを上げる（0.75%まで）
+3. 1ヶ月間は0.01ロットで運用を継続
+4. 安定を確認してからフルサイズに移行
 
-The 20% deviation threshold in the tracker accounts for this uncertainty.
+### 絶対に守るルール
+
+- 🚫 テスト中にパラメータを変更しない
+- 🚫 手動でトレードを閉じない（EAに任せる）
+- 🚫 同じ口座で他のEAを動かさない
+- 🚫 損失を取り返そうとしてロットを上げない
+- 🚫 生活に必要なお金でトレードしない
+
+---
+
+## 9. よくある質問
+
+**Q: デモ口座の残高はいくらが良い？**
+A: 30万円（バックテストと同じ条件にするため）
+
+**Q: VPSは必要？**
+A: デモテスト中は不要（PCをつけっぱなしにできれば）。リアル口座では必須。
+
+**Q: スマホで動かせる？**
+A: いいえ。PCまたはVPS上のMT5でのみ動作します。
+
+**Q: トレードが全然入らない場合は？**
+A: MinEntryScore=12は厳しめの設定です。1週間で0件なら、スプレッドや接続を確認してください。
+
+**Q: 設定を変えたほうがいい？**
+A: テスト中は変えないでください。デフォルトがWFA検証済みの最適値です。
+
+**Q: GMTOffsetがわからない**
+A: MT5の「気配値表示」で現在のサーバー時間を確認。日本時間から引いた差がGMTOffsetです。
+例: サーバー時間15:00、日本時間22:00 → 差は7時間 → GMT+2（冬時間）

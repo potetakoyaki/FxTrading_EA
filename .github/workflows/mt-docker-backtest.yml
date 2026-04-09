@@ -1,0 +1,116 @@
+name: MT Docker Backtest
+
+# Docker-based MetaTrader backtesting using ea31337/ea-tester
+# This workflow installs MT4 inside Docker, compiles the EA, and runs a backtest.
+# Note: MT4 installation via winetricks/AHK can be unreliable.
+# If this fails, the Python-based backtest (backtest.yml) is the primary CI check.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mt_version:
+        description: 'MetaTrader version (4 or 5)'
+        required: true
+        default: '4'
+        type: choice
+        options: ['4', '5']
+      symbol:
+        description: 'Symbol to test'
+        required: true
+        default: 'XAUUSD'
+      year:
+        description: 'Year or range (e.g., 2024, 2023-2024)'
+        required: true
+        default: '2024'
+      timeframe:
+        description: 'Timeframe'
+        required: true
+        default: 'M15'
+        type: choice
+        options: ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
+      spread:
+        description: 'Spread in points'
+        required: true
+        default: '30'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull EA-Tester image
+        run: docker pull ea31337/ea-tester:latest
+
+      - name: Install MT platform
+        run: |
+          docker run --name mt-install \
+            -u root \
+            ea31337/ea-tester:latest \
+            install_mt ${{ inputs.mt_version }} 2>&1 | tee install.log
+
+          # Save installed state as image for next steps
+          docker commit mt-install mt-installed
+          docker rm mt-install
+
+      - name: Verify MT installation
+        run: |
+          docker run --rm --entrypoint /bin/bash mt-installed -c '
+            cd /opt/scripts
+            source .vars.inc.sh
+            echo "MT4_DIR=$TERMINAL4_DIR"
+            echo "MT4_EXE=$TERMINAL4_EXE"
+            echo "MT5_DIR=$TERMINAL5_DIR"
+            echo "MT5_EXE=$TERMINAL5_EXE"
+            [ -n "$TERMINAL4_EXE" ] || [ -n "$TERMINAL5_EXE" ] || exit 1
+          '
+
+      - name: Copy EA files to container
+        run: |
+          docker create --name ea-container mt-installed true
+
+          # Copy EA source
+          docker cp AntigravityMTF_EA_Gold.mq5 ea-container:/home/ubuntu/
+
+          # Copy Include files
+          docker cp Include/. ea-container:/home/ubuntu/Include/
+
+          docker commit ea-container mt-with-ea
+          docker rm ea-container
+
+      - name: Run backtest
+        run: |
+          docker run --rm \
+            --name ea-backtest \
+            -v ${{ github.workspace }}/backtest_results:/opt/results:rw \
+            -e MT_VER=${{ inputs.mt_version }} \
+            -e BT_LEVERAGE=100 \
+            -e BT_TESTMODEL=0 \
+            mt-with-ea \
+            run_backtest \
+              -e AntigravityMTF_EA_Gold \
+              -p ${{ inputs.symbol }} \
+              -T ${{ inputs.timeframe }} \
+              -y ${{ inputs.year }} \
+              -S ${{ inputs.spread }} \
+              -d 10000 \
+              -c USD \
+              -b DS \
+              -v -t -j \
+            2>&1 | tee backtest_results/console.log
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt-backtest-results
+          path: |
+            backtest_results/
+            install.log
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rmi mt-installed mt-with-ea 2>/dev/null || true

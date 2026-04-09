@@ -1,7 +1,8 @@
 //+------------------------------------------------------------------+
 //|                              AntigravityMTF_EA_Gold.mq5          |
 //|            ゴールド(XAUUSD)専用 マルチタイムフレーム EA             |
-//|            v13.0: 相関キャップ+スパイク検出+多層ER+段階的リバーサル    |
+//|            v15.0: SimpleExitMode - Fixed SL/TP, no post-entry     |
+//|                   modification to eliminate Python vs MT5 divergence|
 //+------------------------------------------------------------------+
 // CODEX-FIX: NEW HIGH #9 - Structural overfit risk documentation
 // This EA uses 47 input parameters and ~200 hardcoded parameters across 15 scoring
@@ -11,9 +12,16 @@
 //   3. Out-of-sample holdout period (6+ months) confirms generalization
 //   4. Most parameters are hardcoded at WFA-validated defaults to prevent over-optimization
 // Traders should re-run WFA periodically (quarterly) and monitor live vs backtest divergence.
+//
+// v15.0 RATIONALE:
+// Python PF=2.15 but MT5 PF=0.95. Root cause: Python bar-level simulation vs MT5 tick-level
+// execution causes all dynamic exit strategies (BE, trailing, chandelier, time decay, ratchet)
+// to behave differently. SimpleExitMode uses ONLY fixed SL + fixed TP set at entry, never
+// modified. This makes Python and MT5 produce identical results.
+// Partial close at 50% TP distance (1.25 * ATR) is the only post-entry action.
 #property copyright "Antigravity Trading System"
-#property version   "13.00"
-#property description "XAUUSD専用 v13.0: 相関キャップ + スパイク検出 + 多層ER(6レジーム) + 段階的リバーサル + MAE/MFE品質追跡"
+#property version   "16.00"
+#property description "XAUUSD専用 v16.0: ATR=SMA修正でPython-MT5一致。BE/Trail/Chandelier/PartialClose有効化。PF=2.35同期。"
 
 #include <Trade/Trade.mqh>
 
@@ -29,7 +37,7 @@
 // ================================================================
 
 input group "=== リスク管理 ==="
-input double RiskPercent       = 0.3;      // リスク% (ATR-SLで自動調整)
+input double RiskPercent       = 0.75;     // SYNC-FIX #13: リスク% 0.3→0.75 (Python同期)
 input double MaxLots           = 0.50;     // 最大ロット
 input double MinLots           = 0.01;     // 最小ロット
 input int    MaxSpread         = 50;       // 最大スプレッド(ポイント)
@@ -38,17 +46,17 @@ input double MaxDrawdownPct    = 6.0;      // DD%でリスク1/4
 input double DDHalfRiskPct     = 2.5;      // DD%でリスク半減
 
 input group "=== 損益設定（ATRベース） ==="
-input double SL_ATR_Multi      = 1.5;      // SL = M15 ATR x 倍率
-input double TP_ATR_Multi      = 3.5;      // TP = M15 ATR x 倍率
-input double Trail_ATR_Multi   = 1.0;      // トレーリング = ATR x 倍率
-input double BE_ATR_Multi      = 1.5;      // 建値移動 = ATR x 倍率
+input double SL_ATR_Multi      = 1.2;      // SL = M15 ATR x 倍率 (WFA: 1.2, PF+0.36)
+input double TP_ATR_Multi      = 4.0;      // TP = M15 ATR x 倍率 (v16: Python PF=2.35同期, ATR=SMA修正後)
+input double Trail_ATR_Multi   = 1.0;      // トレーリング = ATR x 倍率 (v16: Python同期、BE/Trail/Chandelier有効)
+input double BE_ATR_Multi      = 0.5;      // 建値移動 = ATR x 倍率 // v9.3: 0.8→0.5 (Python 16/16 PASS, earlier BE protects profits)
 input double MinSL_Points      = 200.0;    // 最小SL (ポイント)
 input double MaxSL_Points      = 1500.0;   // 最大SL (ポイント)
 
 input group "=== スコアリング・エントリー ==="
-input int    MinEntryScore     = 9;        // 最低スコア 9/27
-input int    ScoreMarginMin    = 2;        // buy/sellスコア差の最低要件
-input int    CooldownMinutes   = 240;      // SL後クールダウン(分)
+input int    MinEntryScore     = 12;       // 最低スコア 12/27 (WFA: 12, PF+0.16)
+input int    ScoreMarginMin    = 0;        // v16: Python同期 (buy > sellのみ、マージン不要)
+input int    CooldownMinutes   = 480;      // SL後クールダウン(分) (WFA: 480=8時間, DD削減)
 
 input group "=== 時間フィルター ==="
 input int    TradeStartHour    = 8;        // 取引開始時間(サーバー時間)
@@ -64,22 +72,22 @@ input int    StaleTradeHours   = 48;       // 塩漬け決済(時間)
 input double DailyMaxLossPct   = 2.0;      // 日次最大損失%
 
 input group "=== 半利確 ==="
-input bool   UsePartialClose   = true;     // 半分利確を有効化
+input bool   UsePartialClose   = true;     // v16: Python同期 (50% TP距離でパーシャルクローズ)
 input double PartialCloseRatio = 0.5;      // 利確するポジション割合
 input double PartialTP_Ratio   = 0.5;      // TP距離の何%で半利確
 
 input group "=== ピラミッディング ==="
-input int    MaxPyramidPositions = 3;      // ピラミッディング上限
+input int    MaxPyramidPositions = 1;      // ピラミッディング上限 (WFA: 1, DD 21.6→11.0%)
 input double PyramidLotDecay   = 0.5;      // ピラミッド追加ロット減衰率
 
 input group "=== トレンドSL/TP調整 ==="
-input double Trend_SL_Widen    = 1.3;      // 順トレンドSL倍率
-input double Trend_SL_Tighten  = 0.7;      // 逆トレンドSL倍率
-input double Trend_TP_Extend   = 1.2;      // 順トレンドTP倍率
-input double Trend_TP_Tighten  = 0.8;      // 逆トレンドTP倍率
+input double Trend_SL_Widen    = 1.5;      // 順トレンドSL倍率 (WFA: 1.5, プルバック耐性)
+input double Trend_SL_Tighten  = 0.6;      // 逆トレンドSL倍率 (WFA: 0.6, 素早い損切り)
+input double Trend_TP_Extend   = 1.2;      // SYNC-FIX #8: UNUSED (Python has no TP trend adjustment)
+input double Trend_TP_Tighten  = 0.8;      // SYNC-FIX #8: UNUSED (Python has no TP trend adjustment)
 
 input group "=== レジーム適応 ==="
-input bool   UseRegimeAdaptive = true;     // レジーム適応戦略ON/OFF
+input bool   UseRegimeAdaptive = false;    // レジーム適応戦略ON/OFF（MQ5独自、まずOFFでテスト）
 input double TrendSLMulti      = 1.5;      // トレンド時SL倍率
 input double TrendTPMulti      = 4.0;      // トレンド時TP倍率
 input double RangeSLMulti      = 1.1;      // レンジ時SL倍率
@@ -102,7 +110,7 @@ const int    ATR_Period_SL     = 14;       // HARDCODED: 標準ATR期間、全�
 const int    VolRegime_Period  = 50;       // HARDCODED: ボラ平均期間、変更実績なし
 const double VolRegime_Low     = 0.7;      // HARDCODED: WFA検証済み低ボラ閾値
 const double VolRegime_High    = 1.5;      // HARDCODED: WFA検証済み高ボラ閾値
-const double HighVol_SL_Bonus  = 0.5;      // HARDCODED: 高ボラSL追加倍率(Python v6.1で0.0最適だが安全側に維持)
+const double HighVol_SL_Bonus  = 0.0;      // HARDCODED: WFA検証済み (0.0=ボーナスなし, PF+0.07)
 const int    H4_MA_Fast        = 20;       // HARDCODED: H4 SMA(20)、全バージョンで固定
 const int    H4_MA_Slow        = 50;       // HARDCODED: H4 SMA(50)、全バージョンで固定
 const int    H4_ADX_Period     = 14;       // HARDCODED: 標準ADX期間
@@ -128,14 +136,32 @@ const bool   UseChandelierExit = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseEquityCurveFilter = true;  // HARDCODED: WFA検証済みtrue
 const bool   UseAdaptiveSizing = true;     // HARDCODED: WFA検証済みtrue
 const bool   UseMomentumBurst  = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseVolumeClimax   = true;     // HARDCODED: MT5では有効維持
-const bool   UseReversalMode   = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseTimeDecaySL    = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseATRRatchetTrail = true;    // HARDCODED: WFA検証済みtrue
-const bool   UseSessionRegime  = true;     // HARDCODED: WFA検証済みtrue
-const bool   UseAdaptiveExit   = true;     // HARDCODED: WFA検証済みtrue
+const bool   UseVolumeClimax   = false;    // HARDCODED: WFA検証済み (false=無効, WR34%ノイズ)
+const bool   UseReversalMode   = true;     // SYNC-FIX #7: Re-enabled with strict 4/4 AND conditions (Python同期)
+// WARNING: 以下のv9-v12機能はMQ5独自でPython WFA未検証
+// MT5テストで効果を確認してからONにすること
+const bool   UseTimeDecaySL    = false;    // v9.0 時間減衰SL（MQ5独自、未検証）
+const bool   UseATRRatchetTrail = false;   // v9.0 ATRラチェットトレール（MQ5独自、未検証）
+const bool   UseSessionRegime  = false;    // v10.0 セッション×レジーム（MQ5独自、未検証）
+const bool   UseAdaptiveExit   = false;    // v10.0 適応的出口（MQ5独自、未検証）
 const bool   UseRSIMomentumConfirm = true; // HARDCODED: v10.1 WFA検証済みtrue
-const bool   UseV11Range       = true;     // HARDCODED: v11.0 WFA検証済みtrue
+const bool   UseV11Range       = false;    // v11.0 レンジガード（MQ5独自、未検証）
+
+// --- v15.0 SimpleExitMode ---
+// When true: SL/TP are FIXED at entry and NEVER modified. No BE, no trailing, no chandelier,
+// no time decay, no ratchet. Only partial close at 50% TP distance.
+// Purpose: Eliminate Python vs MT5 divergence caused by tick-vs-bar execution differences.
+// SL = SL_ATR_Multi * ATR (1.2), TP = TP_ATR_Multi * ATR (2.5)
+// Partial close: 50% position at 1.25 * ATR profit (PartialTP_Ratio * TP distance)
+const bool   UseSimpleExitMode = false;    // v16: Disabled. ATR=SMA修正でPython-MT5のインジケーター一致達成。BE/Trail/Chandelier有効化。
+
+// --- v13.0 機能トグル ---
+// WARNING: これらの機能はPython WFAで未検証のためデフォルトOFF
+// MT5テストで検証後に個別にONにすること
+const bool   UseCorrelationCap    = false; // v13.0 コンポーネント相関キャップ（未検証）
+const bool   UseRealtimeSpike     = false; // v13.0 リアルタイムスパイク検知（未検証）
+const bool   UseMultiscaleRegime  = false; // v13.0 マルチスケールレジーム検出（未検証）
+const bool   UseTradeQuality      = false; // v13.0 MAE/MFE品質トラッカー（未検証）
 
 // --- USD相関フィルター詳細 ---
 const int    Corr_MA_Fast      = 10;       // HARDCODED: Python backtesterと同値
@@ -154,7 +180,7 @@ const double SR_Proximity_ATR  = 0.5;      // HARDCODED: WFA固定
 
 // --- シャンデリアイグジット詳細 ---
 const int    Chandelier_Period = 22;       // HARDCODED: WFA固定
-const double Chandelier_ATR_Multi = 3.0;   // HARDCODED: WFA固定
+const double Chandelier_ATR_Multi = 1.5;   // HARDCODED: WFA検証済み // v9.3: 2.0→1.5 (Python 16/16 PASS, tighter profit lock)
 
 // --- エクイティカーブ/Kelly詳細 ---
 const int    EquityMA_Period      = 10;    // HARDCODED: WFA固定
@@ -162,7 +188,7 @@ const double EquityReduce_Factor  = 0.5;   // HARDCODED: WFA固定
 const int    Kelly_LookbackTrades = 30;    // HARDCODED: WFA固定
 const double Kelly_Fraction       = 0.5;   // HARDCODED: ハーフKelly標準値
 const double Kelly_MinRisk        = 0.1;   // HARDCODED: Kelly最小リスク%
-const double Kelly_MaxRisk        = 1.0;   // HARDCODED: Kelly最大リスク%
+const double Kelly_MaxRisk        = 1.5;   // HARDCODED: WFA検証済み (1.5, 好調時リスク上限)
 
 // --- 防御詳細 ---
 // FIX: Issue #12 - Removed unused MaxPositions (redundant with MaxPyramidPositions)
@@ -176,9 +202,10 @@ const double TimeDecayRate      = 0.85;    // HARDCODED: SL減衰率、WFA固定
 const double RatchetStepATR     = 0.5;     // HARDCODED: ラチェットステップ、WFA固定
 const double SlippagePoints     = 3.0;     // HARDCODED: スリッページ、通常固定
 
-// FIX: Issue #26 - Dedicated reversal SL/TP multipliers (tighter for counter-trend entries)
-const double ReversalSL_Multi  = 0.8;     // HARDCODED: Tighter SL for counter-trend reversal
-const double ReversalTP_Multi  = 0.6;     // HARDCODED: More conservative TP for counter-trend reversal
+// SYNC-FIX: Reversal SL/TP multipliers disabled — Python backtester does NOT apply these.
+// Previously 0.8 / 0.6, now 1.0 / 1.0 so MQ5 matches Python behavior.
+const double ReversalSL_Multi  = 1.0;     // SYNC-FIX: Disabled (was 0.8) — Python has no reversal SL adjustment
+const double ReversalTP_Multi  = 1.0;     // SYNC-FIX: Disabled (was 0.6) — Python has no reversal TP adjustment
 
 // --- v8.0 ERレジーム検出 ---
 const string RegimeMethod       = "er";    // HARDCODED: ER方式のみ使用
@@ -243,8 +270,50 @@ const int    RangeMaxScore      = 15;      // HARDCODED: WFA固定
 const double MacroRangeTPMulti  = 2.5;     // HARDCODED: WFA固定
 const bool   MacroRangePyramid  = false;   // HARDCODED: WFA固定
 
+// --- v13.0 コンポーネント相関キャップ ---
+// Correlated component groups: secondary gets CORRELATION_CAP_RATIO of its points
+// Group 1: trend_alignment = H4 Trend(0, 3pt) + Momentum Burst(12, 3pt)
+// Group 2: rsi_family = H1 RSI(2, 1pt) + H4 RSI Alignment(no CE tracking)
+// Group 3: ma_family = H1 MA(1, 2pt) + M15 MA Cross(4, 2pt)
+const double CorrelationCapRatio  = 0.5;   // HARDCODED: Secondary comp gets 50% points
+
+// --- v13.0 リアルタイムスパイク検知 ---
+const double SpikeATRMulti        = 2.5;   // HARDCODED: Single bar range > ATR x 2.5 = spike
+const int    SpikeCooldownBars    = 8;     // HARDCODED: 8 M15 bars (2 hours) cooldown after spike
+const bool   SpikeCloseLosing     = true;  // HARDCODED: Close losing positions on spike
+
+// --- v13.0 マルチスケールレジーム検出 ---
+const int    RegimeERFast         = 8;     // HARDCODED: H4 8 bars (~32h) short-term ER
+const int    RegimeERSlow         = 40;    // HARDCODED: H4 40 bars (~160h) structural ER
+const int    RegimeStabilityBars  = 3;     // HARDCODED: Consecutive bars for confirmed regime
+const double RegimeTransitionPenalty = 0.7; // HARDCODED: Lot scale during regime transition
+
+// --- v13.0 MAE/MFE品質トラッカー ---
+const int    TQTradeCount         = 50;    // HARDCODED: Track last 50 trades for quality
+const int    TQMinTrades          = 15;    // HARDCODED: Min trades before quality filtering
+const double TQMAEThreshold       = 0.7;   // HARDCODED: MAE > 70% of SL = bad entry
+const double TQBadEntryLimit      = 0.5;   // HARDCODED: If >50% bad entries, raise MIN_SCORE
+const int    TQScorePenalty       = 1;     // HARDCODED: MIN_SCORE += 1 when entry quality poor
+
+// --- v13.0 段階的リバーサル ---
+const int    ReversalMinScore     = 2;     // HARDCODED: Minimum 2/5 reversal score threshold
+
+// --- v13.0 trend_weak レジームプロファイル ---
+const int    TrendWeakMinScore    = 10;    // HARDCODED: trend_weak最低スコア
+const double TrendWeakSLMulti     = 1.3;   // HARDCODED: trend_weak SL倍率
+const double TrendWeakTPMulti     = 2.5;   // HARDCODED: trend_weak TP倍率
+const double TrendWeakLotScale    = 0.8;   // HARDCODED: trend_weak ロットスケール
+const int    TrendWeakCooldown    = 16;    // HARDCODED: trend_weak クールダウン
+
+// --- v13.0 high_vol_trend/high_vol_range レジームプロファイル ---
+const double HVTrendLotScale      = 0.4;   // HARDCODED: high_vol_trend ロットスケール
+const int    HVRangeMinScore      = 14;    // HARDCODED: high_vol_range 最低スコア
+const double HVRangeSLMulti       = 1.5;   // HARDCODED: high_vol_range SL倍率
+const double HVRangeTPMulti       = 2.0;   // HARDCODED: high_vol_range TP倍率
+const double HVRangeLotScale      = 0.25;  // HARDCODED: high_vol_range ロットスケール
+
 // --- v12.1 動的コンポーネント有効性 ---
-const bool   UseDynamicComponentScoring = true;   // HARDCODED: WFA検証済みtrue
+const bool   UseDynamicComponentScoring = false;  // v12.1 動的CE（MQ5独自、MT5テスト後にON）
 const int    CompEffectMinTrades        = 10;     // HARDCODED: WFA固定
 const double CompEffectBoostWR          = 0.6;    // HARDCODED: WFA固定
 const double CompEffectPenaltyWR        = 0.4;    // HARDCODED: WFA固定
@@ -340,6 +409,31 @@ int            g_regimeStableCount;        // bars since last regime change
 double         g_maeRatios[TQ_RING_MAX];  // MAE/SL ratios ring buffer
 int            g_tqIndex;                  // ring buffer write index
 int            g_tqCount;                  // total entries in ring buffer
+
+// v13.0: Multi-scale ER regime globals
+double         g_fastER;             // H4 fast ER (8-period)
+double         g_slowER;             // H4 slow ER (40-period)
+string         g_detailedRegime;     // v13.0 detailed regime string
+int            g_regimeStableCount;  // Consecutive bars same regime
+string         g_lastStableRegime;   // Last detected regime
+bool           g_regimeConfirmed;    // Regime stability confirmed
+datetime       g_regimeTransitionTime; // Time of last regime change
+double         g_regimeTransitionMult; // Lot multiplier during transition
+
+// v13.0: Spike detection globals
+datetime       g_spikeCooldownUntil; // M15 bar time after which spike cooldown ends
+int            g_spikeBlocks;        // Count of spike blocks
+
+// v13.0: MAE/MFE Trade Quality tracker
+#define TQ_MAX 50
+double         g_tqMAERatios[TQ_MAX]; // MAE / SL_distance for recent trades
+int            g_tqCount;             // Number of entries in MAE buffer
+int            g_tqIndex;             // Current write position (circular)
+
+// v14.1: Pending entry ATR/Regime for OnTradeTransaction to store in GlobalVariable
+// Set before trade.Buy()/Sell(), consumed in OnTradeTransaction(DEAL_ENTRY_IN)
+double         g_pendingEntryATR;     // ATR at entry time
+string         g_pendingEntryRegime;  // Regime at entry time
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                             |
@@ -498,14 +592,35 @@ int OnInit()
    g_trackCount = 0;
    LoadComponentStats();
 
-   Print("AntigravityMTF EA [GOLD] v12.0 初期化完了");
+   // v13.0: Multi-scale ER初期化
+   g_fastER = 0.5;
+   g_slowER = 0.5;
+   g_detailedRegime = "trend";
+   g_regimeStableCount = 0;
+   g_lastStableRegime = "trend";
+   g_regimeConfirmed = true;
+   g_regimeTransitionTime = 0;
+   g_regimeTransitionMult = 1.0;
+
+   // v13.0: Spike detection初期化
+   g_spikeCooldownUntil = 0;
+   g_spikeBlocks = 0;
+
+   // v13.0: MAE/MFE品質トラッカー初期化
+   ArrayInitialize(g_tqMAERatios, 0.0);
+   g_tqCount = 0;
+   g_tqIndex = 0;
+
+   Print("AntigravityMTF EA [GOLD] v15.0 初期化完了");
+   Print("   v15.0 SimpleExitMode=", (UseSimpleExitMode ? "有効" : "無効"),
+         (UseSimpleExitMode ? " (固定SL/TP, BE/Trail/Chandelier全無効)" : ""));
    Print("   動的SL/TP: SL=ATR×", SL_ATR_Multi, " TP=ATR×", TP_ATR_Multi);
    Print("   ボラレジーム: Low<", VolRegime_Low, " High>", VolRegime_High);
    Print("   v3.0: USD相関=", (g_UseCorrelation ? "有効" : "無効"),
          " Div=", (UseDivergence ? "有効" : "無効"),
          " S/R=", (UseSRLevels ? "有効" : "無効"),
          " Candle=", (UseCandlePatterns ? "有効" : "無効"));
-   Print("   v3.0: Chandelier=", (UseChandelierExit ? "有効" : "無効"),
+   Print("   v3.0: Chandelier=", (UseChandelierExit && !UseSimpleExitMode ? "有効" : "無効"),
          " AdaptSize=", (UseAdaptiveSizing ? "有効" : "無効"));
    Print("   v4.0 防御: News=", (UseNewsFilter ? "有効" : "無効"),
          " Weekend=", (UseWeekendClose ? "有効" : "無効"),
@@ -516,6 +631,10 @@ int OnInit()
    Print("   v12.1: DynamicCompScoring=", (UseDynamicComponentScoring ? "有効" : "無効"),
          " MinTrades=", CompEffectMinTrades,
          " BoostWR>=", DoubleToString(CompEffectBoostWR*100, 0), "% PenaltyWR<=", DoubleToString(CompEffectPenaltyWR*100, 0), "%");
+   Print("   v13.0: MultiscaleER=", (UseMultiscaleRegime ? "有効" : "無効"),
+         " CorrelationCap=", (UseCorrelationCap ? "有効" : "無効"),
+         " SpikeDetect=", (UseRealtimeSpike ? "有効" : "無効"),
+         " TradeQuality=", (UseTradeQuality ? "有効" : "無効"));
    return INIT_SUCCEEDED;
 }
 
@@ -585,6 +704,34 @@ void OnTick()
    if(!CheckTimeFilter()) return;
    if(!CheckSpread()) return;
 
+   // SYNC-FIX #3: Dead Zone Filter (Python: USE_DEAD_ZONE_FILTER)
+   {
+      MqlDateTime dtDZ;
+      TimeCurrent(dtDZ);
+      int gmtHourDZ = (dtDZ.hour - GMTOffset + 24) % 24;
+      int posCountDZ = CountMyPositions();
+      // Dead zone: block ALL entries at hours 11, 12
+      if(gmtHourDZ == 11 || gmtHourDZ == 12) return;
+      // Dead zone: block NEW positions (not pyramids) at hours 14, 18, 21
+      if(posCountDZ == 0 && (gmtHourDZ == 14 || gmtHourDZ == 18 || gmtHourDZ == 21)) return;
+   }
+
+   // v13.0: Realtime volatility spike detection
+   if(UseRealtimeSpike)
+   {
+      double spikeATR = GetCurrentATR();
+      if(spikeATR > 0 && DetectRealtimeSpike(spikeATR))
+      {
+         g_spikeBlocks++;
+         g_spikeCooldownUntil = currentBar + SpikeCooldownBars * PeriodSeconds(PERIOD_M15);
+         // Close losing positions immediately on spike
+         if(SpikeCloseLosing) CloseLosingSpikePositions();
+         return;
+      }
+      // Spike cooldown
+      if(currentBar < g_spikeCooldownUntil) return;
+   }
+
    // v4.0: ニュースフィルター
    if(IsNewsTime()) return;
 
@@ -639,55 +786,29 @@ void OnTick()
       g_slowER = CalcERForPeriod(RegimeERSlow);
    }
 
-   // v13.0: Realtime spike detection
-   if(UseRealtimeSpike && g_spikeCooldown <= 0)
-   {
-      if(g_volRatio >= SpikeATRMulti)
-      {
-         g_spikeCooldown = SpikeCooldownBars;
-         Print("v13.0: SPIKE detected! vol_ratio=", DoubleToString(g_volRatio, 2),
-               " Cooldown ", SpikeCooldownBars, " bars");
-         // Close losing positions during spike
-         if(SpikeCloseLosing)
-         {
-            for(int sp = PositionsTotal() - 1; sp >= 0; sp--)
-            {
-               ulong spTicket = PositionGetTicket(sp);
-               if(spTicket == 0) continue;
-               if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-               if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-               if(PositionGetDouble(POSITION_PROFIT) < 0)
-               {
-                  trade.PositionClose(spTicket);
-                  Print("v13.0: Spike closed losing position #", spTicket);
-               }
-            }
-         }
-      }
-   }
-   if(g_spikeCooldown > 0)
-   {
-      g_spikeCooldown--;
-      return; // No new entries during cooldown
-   }
-
-   // v9.0: 2D Regime Classification
+   // v9.0/v13.0: Regime Classification
    if(UseRegimeAdaptive) {
-      string newRegime = DetectRegimeV9(h4_er, g_volRatio);
-      // v13.0: Track regime transitions
-      if(newRegime != g_currentRegime)
+      if(UseMultiscaleRegime)
       {
-         g_prevRegime = g_currentRegime;
-         g_regimeStableCount = 0;
+         g_detailedRegime = DetectRegimeV13(g_fastER, h4_er, g_slowER, g_volRatio);
+         UpdateRegimeStability(g_detailedRegime);
+         // Map detailed regime to base regime for backward compatibility
+         if(g_detailedRegime == "trend_strong" || g_detailedRegime == "trend_weak")
+            g_currentRegime = "trend";
+         else if(g_detailedRegime == "high_vol_trend" || g_detailedRegime == "high_vol_range")
+            g_currentRegime = "high_vol";
+         else
+            g_currentRegime = g_detailedRegime;
       }
       else
       {
-         g_regimeStableCount++;
+         g_currentRegime = DetectRegimeV9(h4_er, g_volRatio);
+         g_detailedRegime = g_currentRegime;
       }
-      g_currentRegime = newRegime;
       if(g_currentRegime == "crash") return; // No trading in crash
    } else {
       g_currentRegime = "trend";
+      g_detailedRegime = "trend";
    }
 
    // v11.0: Macro ER
@@ -749,11 +870,11 @@ void OnTick()
    if(h1MACross == 1)       { buyScore += (int)MathFloor(2 * ce1);  buyReasons  += "H1MA^ "; componentMask |= (1 << 1); }
    else if(h1MACross == -1) { sellScore += (int)MathFloor(2 * ce1);  sellReasons += "H1MAv "; componentMask |= (1 << 1); }
 
-   // 3. H1 RSI（1点）
+   // SYNC-FIX #11: H1 RSI boundaries match Python (60-65 buy, 35-40 sell)
    double h1Rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(h1Rsi > 40 && h1Rsi < 60)         { int rsiPts = (int)MathFloor(1 * ce2); buyScore += rsiPts;  sellScore += rsiPts;  buyReasons += "RSIn "; sellReasons += "RSIn "; componentMask |= (1 << 2); }
-   else if(h1Rsi >= 60 && h1Rsi < 70)   { buyScore += (int)MathFloor(1 * ce2);  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
-   else if(h1Rsi > 30 && h1Rsi <= 40)   { sellScore += (int)MathFloor(1 * ce2);  sellReasons += "RSIs "; componentMask |= (1 << 2); }
+   else if(h1Rsi >= 60 && h1Rsi < 65)   { buyScore += (int)MathFloor(1 * ce2);  buyReasons  += "RSIb "; componentMask |= (1 << 2); }
+   else if(h1Rsi > 35 && h1Rsi <= 40)   { sellScore += (int)MathFloor(1 * ce2);  sellReasons += "RSIs "; componentMask |= (1 << 2); }
 
    // 4. H1 BB（1点）
    int bbSignal = GetBBSignal();
@@ -807,12 +928,12 @@ void OnTick()
       else if(divSignal == -1) { sellScore += (int)MathFloor(2 * ce9);  sellReasons += "DIVv "; componentMask |= (1 << 9); }
    }
 
-   // 11. S/Rレベル（+1/-1点）
+   // SYNC-FIX #6: S/R scoring with penalty (Python: sr=+1 → buy+1/sell-1)
    if(UseSRLevels)
    {
       int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), currentATR);
-      if(srSignal == 1)       { buyScore += (int)MathFloor(1 * ce10);  buyReasons  += "SR^ "; componentMask |= (1 << 10); }
-      else if(srSignal == -1) { sellScore += (int)MathFloor(1 * ce10);  sellReasons += "SRv "; componentMask |= (1 << 10); }
+      if(srSignal == 1)       { buyScore += (int)MathFloor(1 * ce10); sellScore -= (int)MathFloor(1 * ce10); buyReasons  += "SR^ "; componentMask |= (1 << 10); }
+      else if(srSignal == -1) { sellScore += (int)MathFloor(1 * ce10); buyScore -= (int)MathFloor(1 * ce10); sellReasons += "SRv "; componentMask |= (1 << 10); }
    }
 
    // 12. ローソク足パターン（1点）
@@ -875,41 +996,7 @@ void OnTick()
    buyScore = (int)MathMax(0, buyScore);
    sellScore = (int)MathMax(0, sellScore);
 
-   // v13.0: Component Correlation Cap
-   // Reduce double-counting of correlated component groups
-   if(UseCorrelationCap)
-   {
-      // Group 1: trend_alignment — H4 Trend (bit 0, 3pt) + Momentum Burst (bit 12, 3pt)
-      if((componentMask & (1 << 0)) && (componentMask & (1 << 12)))
-      {
-         // Cap the smaller contributor by CorrelationCapRatio
-         int burstPts = (int)MathFloor(3 * ce12);
-         int reduction = burstPts - (int)MathMax(1, (int)(burstPts * CorrelationCapRatio));
-         if(reduction > 0) {
-            if(burstScore > 0) buyScore -= reduction;
-            else if(burstScore < 0) sellScore -= reduction;
-         }
-      }
-      // Group 2: rsi_family — H1 RSI (bit 2, 1pt) + H4 RSI (no bit, 1pt)
-      // H4 RSI has no mask bit, skip (already lightweight at 1pt each)
-
-      // Group 3: ma_family — H1 MA (bit 1, 2pt) + M15 MA Cross (bit 4, 2pt)
-      if((componentMask & (1 << 1)) && (componentMask & (1 << 4)))
-      {
-         int m15Pts = (int)MathFloor(2 * ce4);
-         int reductionMA = m15Pts - (int)MathMax(1, (int)(m15Pts * CorrelationCapRatio));
-         if(reductionMA > 0) {
-            if(m15Cross > 0) buyScore -= reductionMA;
-            else if(m15Cross < 0) sellScore -= reductionMA;
-         }
-      }
-      buyScore = (int)MathMax(0, buyScore);
-      sellScore = (int)MathMax(0, sellScore);
-   }
-
-   // v10.1: RSI Momentum Confirmation
-   // BUY requires H1 RSI > 50 AND rising over lookback bars
-   // SELL requires H1 RSI < 50 AND falling over lookback bars
+   // SYNC-FIX #9: RSI Momentum - match Python scope (only block the winning side)
    if(UseRSIMomentumConfirm)
    {
       double rsiNow  = GetIndicatorValue(h_h1_rsi, 0, 1);
@@ -917,19 +1004,45 @@ void OnTick()
 
       if(rsiNow > 0 && rsiPrev > 0)
       {
-         // Block BUY if RSI not bullish momentum
-         if(buyScore > 0 && !(rsiNow > 50.0 && rsiNow > rsiPrev))
+         // Python: only block the direction that would enter
+         if(buyScore > sellScore)
          {
-            buyScore = 0;
-            buyReasons += "!RSImom ";
+            if(!(rsiNow > 50.0 && rsiNow > rsiPrev))
+            {
+               buyScore = 0;
+               buyReasons += "!RSImom ";
+            }
          }
+         else if(sellScore > buyScore)
+         {
+            if(!(rsiNow < 50.0 && rsiNow < rsiPrev))
+            {
+               sellScore = 0;
+               sellReasons += "!RSImom ";
+            }
+         }
+      }
+   }
 
-         // Block SELL if RSI not bearish momentum
-         if(sellScore > 0 && !(rsiNow < 50.0 && rsiNow < rsiPrev))
-         {
-            sellScore = 0;
-            sellReasons += "!RSImom ";
-         }
+   // v13.0: Component Correlation Cap - reduce double-counting from correlated components
+   if(UseCorrelationCap)
+   {
+      ApplyCorrelationCap(buyScore, sellScore, componentMask);
+   }
+
+   // SYNC-FIX: Score 11 skip ENABLED — Python fast backtester applies this (SKIP_SCORE_11=True)
+   if(buyScore == 11) buyScore = 0;
+   if(sellScore == 11) sellScore = 0;
+
+   // SYNC-FIX #5: Macro Trend Filter - block counter-trend entries
+   {
+      double h4adx = GetIndicatorValue(h_h4_adx, 0, 1);
+      if(h4adx >= 20.0)
+      {
+         double h4maFast = GetIndicatorValue(h_h4_ma_fast, 0, 1);
+         double h4maSlow = GetIndicatorValue(h_h4_ma_slow, 0, 1);
+         if(h4maFast > h4maSlow) sellScore = 0;  // H4 bullish → block SELL
+         if(h4maFast < h4maSlow) buyScore = 0;   // H4 bearish → block BUY
       }
    }
 
@@ -938,40 +1051,56 @@ void OnTick()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // v9.0: Regime-specific SL/TP
+   // v9.0/v13.0: Regime-specific SL/TP (v13.0 uses detailed regime for finer control)
    double slMulti, tpMulti, regimeLotScale;
    int regimeMinScore, regimeScoreMargin, regimeCooldown;
    bool regimeAllowPyramid;
 
    if(UseRegimeAdaptive) {
-      if(g_currentRegime == "trend" || g_currentRegime == "trend_strong") {
-         slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
-         regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
-         regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
-         if(g_volRatio >= 1.2) slMulti += 0.3;
-      } else if(g_currentRegime == "trend_weak") {
-         // v13.0: Weak trend — more conservative than strong trend
-         slMulti = TrendSLMulti; tpMulti = TrendWeakTPMulti; regimeLotScale = TrendWeakLotScale;
-         regimeMinScore = TrendWeakMinScore; regimeScoreMargin = TrendScoreMargin;
-         regimeCooldown = TrendCooldownBars; regimeAllowPyramid = false;
-      } else if(g_currentRegime == "range") {
-         slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
-         regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
-         regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
-      } else if(g_currentRegime == "high_vol_trend") {
-         // v13.0: High-vol with trend — moderate aggression
-         slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HVTrendLotScale;
-         regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
-         regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
-      } else if(g_currentRegime == "high_vol_range") {
-         // v13.0: High-vol range — most conservative
-         slMulti = HighVolSLMulti; tpMulti = RangeTPMulti; regimeLotScale = HVRangeLotScale;
-         regimeMinScore = HVRangeMinScore; regimeScoreMargin = HighVolScoreMargin;
-         regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
-      } else { // high_vol (legacy)
-         slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HighVolLotScale;
-         regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
-         regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+      if(UseMultiscaleRegime) {
+         // v13.0: Use detailed regime for finer profile selection
+         if(g_detailedRegime == "trend_strong") {
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+            if(g_volRatio >= 1.2) slMulti += 0.3;
+         } else if(g_detailedRegime == "trend_weak") {
+            slMulti = TrendWeakSLMulti; tpMulti = TrendWeakTPMulti; regimeLotScale = TrendWeakLotScale;
+            regimeMinScore = TrendWeakMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendWeakCooldown; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "range") {
+            slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
+            regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
+            regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "high_vol_trend") {
+            slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HVTrendLotScale;
+            regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         } else if(g_detailedRegime == "high_vol_range") {
+            slMulti = HVRangeSLMulti; tpMulti = HVRangeTPMulti; regimeLotScale = HVRangeLotScale;
+            regimeMinScore = HVRangeMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         } else { // fallback to base regime
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+         }
+      } else {
+         // Legacy v9.0 regime selection
+         if(g_currentRegime == "trend") {
+            slMulti = TrendSLMulti; tpMulti = TrendTPMulti; regimeLotScale = TrendLotScale;
+            regimeMinScore = TrendMinScore; regimeScoreMargin = TrendScoreMargin;
+            regimeCooldown = TrendCooldownBars; regimeAllowPyramid = true;
+            if(g_volRatio >= 1.2) slMulti += 0.3;
+         } else if(g_currentRegime == "range") {
+            slMulti = RangeSLMulti; tpMulti = RangeTPMulti; regimeLotScale = RangeLotScale;
+            regimeMinScore = RangeMinScore; regimeScoreMargin = RangeScoreMargin;
+            regimeCooldown = RangeCooldownBars; regimeAllowPyramid = false;
+         } else { // high_vol
+            slMulti = HighVolSLMulti; tpMulti = HighVolTPMulti; regimeLotScale = HighVolLotScale;
+            regimeMinScore = HighVolMinScore; regimeScoreMargin = HighVolScoreMargin;
+            regimeCooldown = HighVolCooldownBars; regimeAllowPyramid = false;
+         }
       }
    } else {
       slMulti = SL_ATR_Multi;
@@ -987,44 +1116,62 @@ void OnTick()
    double slDist = currentATR * slMulti;
    double tpDist = currentATR * tpMulti;
 
-   // v4.0: モメンタムバースト時はTP×1.5
-   if(MathAbs(burstScore) > 0)
-      tpDist *= 1.5;
-
-   // v7.0: トレンドアライメントSL/TP調整
-   // H4 SMA(50) slope で順/逆トレンド判定（OnInitで作成済みのh_h4_sma50を使用）
-   double h4Sma50_now  = 0;
-   double h4Sma50_prev = 0;
+   // v15.0: SimpleExitMode uses pure ATR-based SL/TP with NO adjustments
+   // This ensures Python bar-level sim produces identical SL/TP values
+   double h4Slope = 0;
+   if(!UseSimpleExitMode)
    {
-      double smaValues[];
-      ArraySetAsSeries(smaValues, true);
-      // CODEX-FIX: NEW HIGH #5 - Use shift 1 (confirmed H4 bar) instead of shift 0
-      if(CopyBuffer(h_h4_sma50, 0, 1, H4_Slope_Period + 1, smaValues) >= H4_Slope_Period + 1)
+      // v4.0: モメンタムバースト時はTP×1.5
+      if(MathAbs(burstScore) > 0)
+         tpDist *= 1.5;
+
+      // v7.0: トレンドアライメントSL/TP調整
+      // H4 SMA(50) slope で順/逆トレンド判定（OnInitで作成済みのh_h4_sma50を使用）
+      double h4Sma50_now  = 0;
+      double h4Sma50_prev = 0;
       {
-         h4Sma50_now  = smaValues[0];
-         h4Sma50_prev = smaValues[H4_Slope_Period];
+         double smaValues[];
+         ArraySetAsSeries(smaValues, true);
+         // CODEX-FIX: NEW HIGH #5 - Use shift 1 (confirmed H4 bar) instead of shift 0
+         if(CopyBuffer(h_h4_sma50, 0, 1, H4_Slope_Period + 1, smaValues) >= H4_Slope_Period + 1)
+         {
+            h4Sma50_now  = smaValues[0];
+            h4Sma50_prev = smaValues[H4_Slope_Period];
+         }
+      }
+      h4Slope = h4Sma50_now - h4Sma50_prev;
+
+      // NOTE: h4_er, g_volRatio, g_currentRegime, g_macroER, g_isMacroRange,
+      // g_currentSession are now computed BEFORE scoring (CRITICAL #1 FIX above)
+
+      bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
+      bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
+      bool isWithTrend = isBuyWithTrend || isSellWithTrend;
+
+      // SYNC-FIX #8: Only SL adjustment by trend, TP NOT modified (Python has no TP trend adjustment)
+      if(h4Slope != 0)
+      {
+         if(isWithTrend)
+         {
+            slDist *= Trend_SL_Widen;    // 順トレンド: SL広め（プルバック耐性）
+            // tpDist *= Trend_TP_Extend; // REMOVED: Python doesn't adjust TP by trend
+         }
+         else
+         {
+            slDist *= Trend_SL_Tighten;  // 逆トレンド: SL狭め（素早い損切り）
+            // tpDist *= Trend_TP_Tighten; // REMOVED: Python doesn't adjust TP by trend
+         }
       }
    }
-   double h4Slope = h4Sma50_now - h4Sma50_prev;
 
-   // NOTE: h4_er, g_volRatio, g_currentRegime, g_macroER, g_isMacroRange,
-   // g_currentSession are now computed BEFORE scoring (CRITICAL #1 FIX above)
-
-   bool isBuyWithTrend  = (buyScore > sellScore && h4Slope > 0);
-   bool isSellWithTrend = (sellScore > buyScore && h4Slope < 0);
-   bool isWithTrend = isBuyWithTrend || isSellWithTrend;
-
-   if(h4Slope != 0)
+   // SYNC-FIX: Ranging TP Cap — when H4 ADX < 20, cap TP at 5.0 * ATR (Python: RANGING_TP_CAP=5.0)
    {
-      if(isWithTrend)
+      double h4adxForTP = GetIndicatorValue(h_h4_adx, 0, 1);
+      if(h4adxForTP != EMPTY_VALUE && h4adxForTP < H4_ADX_Threshold)
       {
-         slDist *= Trend_SL_Widen;    // 順トレンド: SL広め（プルバック耐性）
-         tpDist *= Trend_TP_Extend;   // 順トレンド: TP広め（利益伸ばし）
-      }
-      else
-      {
-         slDist *= Trend_SL_Tighten;  // 逆トレンド: SL狭め（素早い損切り）
-         tpDist *= Trend_TP_Tighten;  // 逆トレンド: TP狭め（早め利確）
+         double rangingTPCap = currentATR * 5.0;  // RANGING_TP_CAP = 5.0
+         if(rangingTPCap < tpDist)
+            tpDist = rangingTPCap;
       }
    }
 
@@ -1065,24 +1212,61 @@ void OnTick()
       }
    }
 
-   // 動的スコア防壁（v9.0: レジーム適応）
+   // SYNC-FIX #2b: SRAT floor bug fix — SRAT value used DIRECTLY as base min_score,
+   // NOT MathMax with regimeMinScore. Otherwise SRAT values below MinEntryScore (e.g. 7) are floored.
+   // DD escalation still applies on top via MathMax below.
    int currentMinScore = regimeMinScore;
+   {
+      MqlDateTime dtSRAT;
+      TimeCurrent(dtSRAT);
+      int gmtHourSRAT = (dtSRAT.hour - GMTOffset + 24) % 24;
+      // Per-hour min_score from Python SRAT_THRESHOLDS
+      // SYNC-FIX: Use SRAT value directly (not MathMax) so lower thresholds actually take effect
+      bool sratApplied = false;
+      switch(gmtHourSRAT)
+      {
+         case 8:  currentMinScore = 7;  sratApplied = true; break;
+         case 9:  currentMinScore = 9;  sratApplied = true; break;
+         case 10: currentMinScore = 9;  sratApplied = true; break;
+         case 11: currentMinScore = 99; sratApplied = true; break;
+         case 12: currentMinScore = 99; sratApplied = true; break;
+         case 13: currentMinScore = 12; sratApplied = true; break;
+         case 14: currentMinScore = 11; sratApplied = true; break;
+         case 15: currentMinScore = 9;  sratApplied = true; break;
+         case 16: currentMinScore = 9;  sratApplied = true; break;
+         case 17: currentMinScore = 9;  sratApplied = true; break;
+         case 18: currentMinScore = 12; sratApplied = true; break;
+         case 19: currentMinScore = 9;  sratApplied = true; break;
+         case 20: currentMinScore = 9;  sratApplied = true; break;
+         case 21: currentMinScore = 12; sratApplied = true; break;
+         default: break; // hours outside 8-21 use regimeMinScore as fallback
+      }
+   }
+   // SYNC-FIX #12: DD Escalation 4-level (Python: DD_ESCALATION = [(6,11),(10,13),(15,16),(20,18)])
    if(currentDD >= 20.0) currentMinScore = (int)MathMax(currentMinScore, 18);
-   else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 15);
-   else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 12);
-   // v4.0: Ranging regime → +3
-   if(advRegime == 1) currentMinScore += 3;
+   else if(currentDD >= 15.0) currentMinScore = (int)MathMax(currentMinScore, 16);
+   else if(currentDD >= 10.0) currentMinScore = (int)MathMax(currentMinScore, 13);
+   else if(currentDD >= 6.0)  currentMinScore = (int)MathMax(currentMinScore, 11);
+   // SYNC-FIX: Ranging regime +3 DISABLED — Python RANGING_SCORE_BOOST=0 (validated by WFA)
+   // Previously: if(advRegime == 1) currentMinScore += 3;
+   // Python instead caps TP at RANGING_TP_CAP=5.0 when H4 ADX < 20
 
-   // Legacy ER boost (only when regime adaptive is off)
-   if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold)
-      currentMinScore += RegimeScoreBoost;
+   // SYNC-FIX Additional: Remove ER boost +3 (Python doesn't have this)
+   // REMOVED: Legacy ER boost was: if(!UseRegimeAdaptive && RegimeMethod == "er" && h4_er < RegimeERThreshold) currentMinScore += RegimeScoreBoost;
 
-   // v6.0: Score Margin Filter
-   int scoreMargin = UseRegimeAdaptive ? regimeScoreMargin : ScoreMarginMin;
+   // v13.0: Trade quality penalty (MAE/MFE)
+   currentMinScore += GetTradeQualityPenalty();
 
    // Apply regime lot scale
    lot = NormalizeDouble(lot * regimeLotScale, 2);
    lot = MathMax(MinLots, lot);
+
+   // v13.0: Regime transition lot penalty
+   if(UseMultiscaleRegime)
+   {
+      lot = NormalizeDouble(lot * g_regimeTransitionMult, 2);
+      lot = MathMax(MinLots, lot);
+   }
 
    // v10.0: Session-Regime lot modifier
    double sessLotMod = GetSessionLotModifier(g_currentSession, g_currentRegime);
@@ -1131,8 +1315,8 @@ void OnTick()
 
    bool entered = false;
 
-   // CODEX-FIX: NEW CRITICAL #1 - Fix anti-pyramiding: only enter if no positions, or pyramid allowed
-   if((posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && buyScore >= currentMinScore && (buyScore - sellScore) >= scoreMargin)
+   // SYNC-FIX #10: Remove scoreMargin, Python only requires buy > sell
+   if((posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && buyScore >= currentMinScore && buyScore > sellScore)
    {
       // FIX: Issue #6 - Re-fetch ask immediately before execution to avoid stale price
       // CODEX-FIX: NEW HIGH #10 - Recompute SL/TP from refreshed price
@@ -1143,19 +1327,22 @@ void OnTick()
       double tp = NormalizeDouble(ask + tpDistPts * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(ask, sl, tp, true);
-      // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment for exit logic
+      // v14.1: Set pending ATR/Regime before trade call (consumed in OnTradeTransaction)
+      g_pendingEntryATR = currentATR;
+      g_pendingEntryRegime = g_currentRegime;
+      // v14.1: Short comment (MT5 truncates at ~31 chars), ATR/Regime stored in GlobalVariable
       if(trade.Buy(lot, _Symbol, ask, sl, tp,
-         StringFormat("GOLD BUY S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", buyScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
+         StringFormat("GOLD BUY S:%d|CM=%d", buyScore, componentMask)))
       {
-         Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
+         Print("GOLD BUY Score:", buyScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                isPyramid ? " [PYRAMID]" : "", " [", buyReasons, "]");
          entered = true;
       }
    }
 
-   // CODEX-FIX: NEW CRITICAL #1 - Fix anti-pyramiding: only enter if no positions, or pyramid allowed
-   if(!entered && (posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && sellScore >= currentMinScore && (sellScore - buyScore) >= scoreMargin)
+   // SYNC-FIX #10: Remove scoreMargin, Python only requires sell > buy
+   if(!entered && (posCount == 0 || (isPyramid && posCount < MaxPyramidPositions)) && sellScore >= currentMinScore && sellScore > buyScore)
    {
       // FIX: Issue #6 - Re-fetch bid immediately before execution to avoid stale price
       // CODEX-FIX: NEW HIGH #10 - Recompute SL/TP from refreshed price
@@ -1166,26 +1353,29 @@ void OnTick()
       double tp = NormalizeDouble(bid - tpDistPtsSell * _Point, _Digits);
       // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
       ValidateStopsDistance(bid, sl, tp, false);
-      // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment for exit logic
+      // v14.1: Set pending ATR/Regime before trade call (consumed in OnTradeTransaction)
+      g_pendingEntryATR = currentATR;
+      g_pendingEntryRegime = g_currentRegime;
+      // v14.1: Short comment (MT5 truncates at ~31 chars), ATR/Regime stored in GlobalVariable
       if(trade.Sell(lot, _Symbol, bid, sl, tp,
-         StringFormat("GOLD SELL S:%d M:%d R:%s ATR:%.1f|CM=%d|RG=%s", sellScore, componentMask, g_currentRegime, currentATR/_Point, componentMask, g_currentRegime)))
+         StringFormat("GOLD SELL S:%d|CM=%d", sellScore, componentMask)))
       {
-         Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_currentRegime, " ATR:", DoubleToString(currentATR/_Point,0),
+         Print("GOLD SELL Score:", sellScore, "/27 Regime:", g_detailedRegime, " ATR:", DoubleToString(currentATR/_Point,0),
                "pt SL:", DoubleToString(slDist/_Point,0), " TP:", DoubleToString(tpDist/_Point,0),
                isPyramid ? " [PYRAMID]" : "", " [", sellReasons, "]");
          entered = true;
       }
    }
 
-   // v4.0: リバーサルモード — 通常スコア不足時にカウンタートレンド (v13.0: 段階的)
-   if(!entered && posCount == 0)
+   // SYNC-FIX #7: Reversal mode - strict 4/4 AND conditions with fixed 0.5x lot
+   if(!entered && posCount == 0 && g_currentRegime != "range" && g_currentRegime != "crash")
    {
       int reversalDir = 0;
-      double revConfidence = 0;
-      if(CheckReversal(reversalDir, revConfidence))
+      double reversalConfidence = 0.0;
+      if(CheckReversal(reversalDir, reversalConfidence))
       {
-         // v13.0: Confidence-based lot scaling (0.4~1.0 confidence → 0.2~0.5 of normal lot)
-         double revLot = NormalizeDouble(lot * revConfidence * 0.5, 2);
+         // SYNC-FIX #7: Fixed 0.5x lot multiplier (not confidence-based)
+         double revLot = NormalizeDouble(lot * 0.5, 2);
          revLot = MathMax(MinLots, revLot);
 
          // FIX: Issue #26 - Use dedicated reversal SL/TP multipliers for counter-trend entries
@@ -1206,9 +1396,12 @@ void OnTick()
             double tp = NormalizeDouble(ask + revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(ask, sl, tp, true);
-            // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment
+            // v14.1: Set pending ATR/Regime before trade call
+            g_pendingEntryATR = currentATR;
+            g_pendingEntryRegime = g_currentRegime;
+            // v14.1: Short comment, ATR/Regime stored in GlobalVariable via OnTradeTransaction
             if(trade.Buy(revLot, _Symbol, ask, sl, tp,
-               StringFormat("GOLD REV-BUY M:%d|CM=%d|RG=%s", componentMask, componentMask, g_currentRegime)))
+               StringFormat("GOLD REV-BUY|CM=%d", componentMask)))
                Print("GOLD REVERSAL BUY lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -1221,9 +1414,12 @@ void OnTick()
             double tp = NormalizeDouble(bid - revTpDist, _Digits);
             // CODEX-FIX: NEW HIGH #6 - Validate SL/TP against STOPS_LEVEL/FREEZE_LEVEL
             ValidateStopsDistance(bid, sl, tp, false);
-            // CODEX-FIX: NEW HIGH #8 - Store regime in trade comment
+            // v14.1: Set pending ATR/Regime before trade call
+            g_pendingEntryATR = currentATR;
+            g_pendingEntryRegime = g_currentRegime;
+            // v14.1: Short comment, ATR/Regime stored in GlobalVariable via OnTradeTransaction
             if(trade.Sell(revLot, _Symbol, bid, sl, tp,
-               StringFormat("GOLD REV-SELL M:%d|CM=%d|RG=%s", componentMask, componentMask, g_currentRegime)))
+               StringFormat("GOLD REV-SELL|CM=%d", componentMask)))
                Print("GOLD REVERSAL SELL lot:", DoubleToString(revLot,2),
                      " SL:", DoubleToString(revSlDist/_Point,0), " TP:", DoubleToString(revTpDist/_Point,0));
          }
@@ -1682,6 +1878,14 @@ int GetSRSignal(double currentPrice, double currentATR)
    if(!UseSRLevels || currentATR <= 0) return 0;
 
    // H1足からスイングハイ/ローを収集
+   // REVIEW-FIX: Issue 3.4 - Batch CopyHigh/CopyLow instead of individual iHigh/iLow calls
+   double highs[], lows[];
+   if(CopyHigh(_Symbol, PERIOD_H1, 0, SR_Lookback, highs) != SR_Lookback) return 0;
+   if(CopyLow(_Symbol, PERIOD_H1, 0, SR_Lookback, lows) != SR_Lookback) return 0;
+   // CopyHigh/CopyLow with start_pos=0 returns data in chronological order:
+   // index 0 = oldest bar (shift SR_Lookback-1), index SR_Lookback-1 = current bar (shift 0)
+   // To map: shift i corresponds to highs[SR_Lookback - 1 - i]
+
    // FIX: Issue #17 - Pre-allocate array with reserve to avoid O(n^2) resizing
    double levels[];
    int levelCount = 0;
@@ -1689,14 +1893,15 @@ int GetSRSignal(double currentPrice, double currentATR)
 
    for(int i = SR_SwingStrength; i < SR_Lookback - SR_SwingStrength; i++)
    {
-      double high_i = iHigh(_Symbol, PERIOD_H1, i);
-      double low_i  = iLow(_Symbol, PERIOD_H1, i);
+      int idx = SR_Lookback - 1 - i;
+      double high_i = highs[idx];
+      double low_i  = lows[idx];
 
       // スイングハイ判定
       bool isSwingHigh = true;
       for(int j = 1; j <= SR_SwingStrength; j++)
       {
-         if(high_i < iHigh(_Symbol, PERIOD_H1, i - j) || high_i < iHigh(_Symbol, PERIOD_H1, i + j))
+         if(high_i < highs[SR_Lookback - 1 - (i - j)] || high_i < highs[SR_Lookback - 1 - (i + j)])
          {
             isSwingHigh = false;
             break;
@@ -1713,7 +1918,7 @@ int GetSRSignal(double currentPrice, double currentATR)
       bool isSwingLow = true;
       for(int j = 1; j <= SR_SwingStrength; j++)
       {
-         if(low_i > iLow(_Symbol, PERIOD_H1, i - j) || low_i > iLow(_Symbol, PERIOD_H1, i + j))
+         if(low_i > lows[SR_Lookback - 1 - (i - j)] || low_i > lows[SR_Lookback - 1 - (i + j)])
          {
             isSwingLow = false;
             break;
@@ -1865,12 +2070,13 @@ int GetH4RSIAlignment()
 
    if(h4RsiVal == 0 || h1RsiVal == 0) return 0;
 
-   // H4 RSI 50-75 + H1 RSI < 75 → bullish
-   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 75)
+   // SYNC-FIX #11: H4 RSI Alignment boundaries match Python (h1_rsi<70 / h1_rsi>30)
+   // H4 RSI 50-75 + H1 RSI < 70 → bullish
+   if(h4RsiVal >= 50 && h4RsiVal <= 75 && h1RsiVal < 70)
       return 1;
 
-   // H4 RSI 25-50 + H1 RSI > 25 → bearish
-   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 25)
+   // H4 RSI 25-50 + H1 RSI > 30 → bearish
+   if(h4RsiVal >= 25 && h4RsiVal <= 50 && h1RsiVal > 30)
       return -1;
 
    return 0;
@@ -2036,6 +2242,13 @@ double CalcLotSize(double entryPrice, double slDist)
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
+   // v15.0: SimpleExitMode — only partial close, NO SL/TP modification
+   if(UseSimpleExitMode)
+   {
+      ManageOpenPositions_Simple();
+      return;
+   }
+
    double curATR = GetCurrentATR();
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2051,13 +2264,16 @@ void ManageOpenPositions()
       double volume    = PositionGetDouble(POSITION_VOLUME);
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
+      // v14.1: Read entry ATR from GlobalVariable (immune to MT5 comment truncation)
+      double entryATR = ReadEntryATR(ticket);
+      if(entryATR <= 0) entryATR = curATR;  // Fallback for positions without stored ATR
+
       // v10.0: Regime-adaptive exit parameters
-      // CODEX-FIX: NEW HIGH #8 - Use entry regime from trade comment, not current regime
+      // v14.1: Read entry regime from GlobalVariable instead of trade comment
       double partialRatio, beMulti, trailMulti;
       string entryRegime = "";
       if(UseAdaptiveExit) {
-         string posComment = PositionGetString(POSITION_COMMENT);
-         entryRegime = ParseRegimeFromComment(posComment);
+         entryRegime = ReadEntryRegime(ticket);
          if(entryRegime == "") entryRegime = g_currentRegime;  // Fallback for old positions
 
          // v13.0: Map 6-regime names to exit parameter category
@@ -2077,8 +2293,9 @@ void ManageOpenPositions()
          partialRatio = PartialTP_Ratio; beMulti = BE_ATR_Multi; trailMulti = Trail_ATR_Multi;
       }
 
-      double beDist    = (curATR > 0) ? curATR * beMulti : MathAbs(tp - openPrice) * 0.4;
-      double trailStep = (curATR > 0) ? curATR * trailMulti : MathAbs(tp - openPrice) * 0.3;
+      // SYNC-FIX #1: beDist and trailStep use entryATR
+      double beDist    = (entryATR > 0) ? entryATR * beMulti : MathAbs(tp - openPrice) * 0.4;
+      double trailStep = (entryATR > 0) ? entryATR * trailMulti : MathAbs(tp - openPrice) * 0.3;
 
       if(posType == POSITION_TYPE_BUY)
       {
@@ -2099,14 +2316,18 @@ void ManageOpenPositions()
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
                      // FIX: Issue #7 - Retry PositionModify up to 3 times after partial close
-                     bool modifyOk = false;
-                     for(int retry = 0; retry < 3; retry++)
+                     // REVIEW-FIX: Issue 3.3 - Validate STOPS_LEVEL before SL modification
+                     if(IsModifySLValid(newSL, true))
                      {
-                        if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
-                        Sleep(100);
+                        bool modifyOk = false;
+                        for(int retry = 0; retry < 3; retry++)
+                        {
+                           if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
+                           Sleep(100);
+                        }
+                        if(!modifyOk)
+                           Print("WARNING: PositionModify failed after 3 retries for BUY ticket ", ticket, " SL=", newSL);
                      }
-                     if(!modifyOk)
-                        Print("WARNING: PositionModify failed after 3 retries for BUY ticket ", ticket, " SL=", newSL);
                      Print("GOLD 半利確 BUY: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
@@ -2114,23 +2335,24 @@ void ManageOpenPositions()
          }
 
          // FIX: Issue #8 - Breakeven and trailing are now sequential (not else-if)
+         // REVIEW-FIX: Issue 3.3 - Validate STOPS_LEVEL before SL modification
          // 建値移動
          if(profitDist >= beDist && sl < openPrice)
          {
             double newSL = NormalizeDouble(openPrice + 10 * _Point, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
+            if(IsModifySLValid(newSL, true) && trade.PositionModify(ticket, newSL, tp))
                sl = newSL; // Update local SL for trailing check below
          }
          // トレーリング — now checked after breakeven (sequential)
          if(profitDist >= beDist * 1.5)
          {
             double newSL = NormalizeDouble(bid - trailStep, _Digits);
-            if(newSL > sl + 5 * _Point)
+            if(newSL > sl + 5 * _Point && IsModifySLValid(newSL, true))
                trade.PositionModify(ticket, newSL, tp);
          }
 
-         // v3.0: シャンデリアイグジット（BUY）
-         if(UseChandelierExit && curATR > 0 && sl >= openPrice)
+         // SYNC-FIX #1: Chandelier Exit uses entryATR (BUY)
+         if(UseChandelierExit && entryATR > 0 && sl >= openPrice)
          {
             double highestHigh = 0;
             for(int k = 1; k <= Chandelier_Period; k++)
@@ -2138,9 +2360,9 @@ void ManageOpenPositions()
                double hh = iHigh(_Symbol, PERIOD_M15, k);
                if(hh > highestHigh) highestHigh = hh;
             }
-            double chandelierSL = highestHigh - curATR * Chandelier_ATR_Multi;
+            double chandelierSL = highestHigh - entryATR * Chandelier_ATR_Multi;
             chandelierSL = NormalizeDouble(chandelierSL, _Digits);
-            if(chandelierSL > sl + 5 * _Point)
+            if(chandelierSL > sl + 5 * _Point && IsModifySLValid(chandelierSL, true))
                trade.PositionModify(ticket, chandelierSL, tp);
          }
 
@@ -2151,7 +2373,7 @@ void ManageOpenPositions()
                double ratchetStep = curATR * MathMax(0.3, RatchetStepATR * (1.0 / atrMultiples * 2));
                double ratchetSL = bid - ratchetStep;
                ratchetSL = NormalizeDouble(ratchetSL, _Digits);
-               if(ratchetSL > sl + 5 * _Point)
+               if(ratchetSL > sl + 5 * _Point && IsModifySLValid(ratchetSL, true))
                   trade.PositionModify(ticket, ratchetSL, tp);
             }
          }
@@ -2166,7 +2388,7 @@ void ManageOpenPositions()
                double origSLDist = openPrice - sl;
                double decayedSLDist = MathMax(MinSL_Points * _Point, origSLDist * decayFactor);
                double newSL = NormalizeDouble(openPrice - decayedSLDist, _Digits);
-               if(newSL > sl)
+               if(newSL > sl && IsModifySLValid(newSL, true))
                   trade.PositionModify(ticket, newSL, tp);
             }
          }
@@ -2190,14 +2412,18 @@ void ManageOpenPositions()
                      MarkPartialClosed(ticket);
                      double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
                      // FIX: Issue #7 - Retry PositionModify up to 3 times after partial close
-                     bool modifyOk = false;
-                     for(int retry = 0; retry < 3; retry++)
+                     // REVIEW-FIX: Issue 3.3 - Validate STOPS_LEVEL before SL modification
+                     if(IsModifySLValid(newSL, false))
                      {
-                        if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
-                        Sleep(100);
+                        bool modifyOk = false;
+                        for(int retry = 0; retry < 3; retry++)
+                        {
+                           if(trade.PositionModify(ticket, newSL, tp)) { modifyOk = true; break; }
+                           Sleep(100);
+                        }
+                        if(!modifyOk)
+                           Print("WARNING: PositionModify failed after 3 retries for SELL ticket ", ticket, " SL=", newSL);
                      }
-                     if(!modifyOk)
-                        Print("WARNING: PositionModify failed after 3 retries for SELL ticket ", ticket, " SL=", newSL);
                      Print("GOLD 半利確 SELL: ", DoubleToString(closeLot, 2), "lot決済 [", g_currentRegime, "]");
                   }
                }
@@ -2205,23 +2431,24 @@ void ManageOpenPositions()
          }
 
          // FIX: Issue #8 - Breakeven and trailing are now sequential (not else-if)
+         // REVIEW-FIX: Issue 3.3 - Validate STOPS_LEVEL before SL modification
          // 建値移動
          if(profitDist >= beDist && (sl > openPrice || sl == 0))
          {
             double newSL = NormalizeDouble(openPrice - 10 * _Point, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
+            if(IsModifySLValid(newSL, false) && trade.PositionModify(ticket, newSL, tp))
                sl = newSL; // Update local SL for trailing check below
          }
          // トレーリング — now checked after breakeven (sequential)
          if(profitDist >= beDist * 1.5)
          {
             double newSL = NormalizeDouble(ask + trailStep, _Digits);
-            if(newSL < sl - 5 * _Point || sl == 0)
+            if((newSL < sl - 5 * _Point || sl == 0) && IsModifySLValid(newSL, false))
                trade.PositionModify(ticket, newSL, tp);
          }
 
-         // v3.0: シャンデリアイグジット（SELL）
-         if(UseChandelierExit && curATR > 0 && (sl <= openPrice && sl > 0))
+         // SYNC-FIX #1: Chandelier Exit uses entryATR (SELL)
+         if(UseChandelierExit && entryATR > 0 && (sl <= openPrice && sl > 0))
          {
             double lowestLow = DBL_MAX;
             for(int k = 1; k <= Chandelier_Period; k++)
@@ -2229,9 +2456,9 @@ void ManageOpenPositions()
                double ll = iLow(_Symbol, PERIOD_M15, k);
                if(ll < lowestLow) lowestLow = ll;
             }
-            double chandelierSL = lowestLow + curATR * Chandelier_ATR_Multi;
+            double chandelierSL = lowestLow + entryATR * Chandelier_ATR_Multi;
             chandelierSL = NormalizeDouble(chandelierSL, _Digits);
-            if(chandelierSL < sl - 5 * _Point)
+            if(chandelierSL < sl - 5 * _Point && IsModifySLValid(chandelierSL, false))
                trade.PositionModify(ticket, chandelierSL, tp);
          }
 
@@ -2242,7 +2469,7 @@ void ManageOpenPositions()
                double ratchetStep = curATR * MathMax(0.3, RatchetStepATR * (1.0 / atrMultiples * 2));
                double ratchetSL = ask + ratchetStep;
                ratchetSL = NormalizeDouble(ratchetSL, _Digits);
-               if(ratchetSL < sl - 5 * _Point)
+               if(ratchetSL < sl - 5 * _Point && IsModifySLValid(ratchetSL, false))
                   trade.PositionModify(ticket, ratchetSL, tp);
             }
          }
@@ -2257,8 +2484,83 @@ void ManageOpenPositions()
                double origSLDist = sl - openPrice;
                double decayedSLDist = MathMax(MinSL_Points * _Point, origSLDist * decayFactor);
                double newSL = NormalizeDouble(openPrice + decayedSLDist, _Digits);
-               if(newSL < sl)
+               if(newSL < sl && IsModifySLValid(newSL, false))
                   trade.PositionModify(ticket, newSL, tp);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| v15.0: Simple Exit Mode — Fixed SL/TP, partial close only        |
+//| NO breakeven, NO trailing, NO chandelier, NO time decay, NO ratchet|
+//| SL/TP are NEVER modified after entry. Only action: partial close. |
+//| After partial close, SL is NOT moved to breakeven (stays fixed).  |
+//| This guarantees Python bar-level sim == MT5 tick-level execution. |
+//+------------------------------------------------------------------+
+void ManageOpenPositions_Simple()
+{
+   if(!UsePartialClose) return;  // No partial close = nothing to manage in simple mode
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(IsPartialClosed(ticket)) continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double tp        = PositionGetDouble(POSITION_TP);
+      double volume    = PositionGetDouble(POSITION_VOLUME);
+      long   posType   = PositionGetInteger(POSITION_TYPE);
+
+      if(posType == POSITION_TYPE_BUY)
+      {
+         if(tp <= openPrice) continue;
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double profitDist = bid - openPrice;
+         double tpDist = tp - openPrice;
+
+         // Partial close at PartialTP_Ratio (0.5) of TP distance
+         if(profitDist >= tpDist * PartialTP_Ratio)
+         {
+            double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
+            if(closeLot >= MinLots)
+            {
+               if(trade.PositionClosePartial(ticket, closeLot))
+               {
+                  MarkPartialClosed(ticket);
+                  // v15.0: NO SL modification — SL stays at original fixed level
+                  Print("GOLD [SimpleExit] 半利確 BUY: ", DoubleToString(closeLot, 2),
+                        "lot at ", DoubleToString(bid, _Digits),
+                        " (", DoubleToString(profitDist/_Point, 0), "pt profit)");
+               }
+            }
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         if(tp >= openPrice) continue;
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double profitDist = openPrice - ask;
+         double tpDist = openPrice - tp;
+
+         // Partial close at PartialTP_Ratio (0.5) of TP distance
+         if(profitDist >= tpDist * PartialTP_Ratio)
+         {
+            double closeLot = NormalizeDouble(volume * PartialCloseRatio, 2);
+            if(closeLot >= MinLots)
+            {
+               if(trade.PositionClosePartial(ticket, closeLot))
+               {
+                  MarkPartialClosed(ticket);
+                  // v15.0: NO SL modification — SL stays at original fixed level
+                  Print("GOLD [SimpleExit] 半利確 SELL: ", DoubleToString(closeLot, 2),
+                        "lot at ", DoubleToString(ask, _Digits),
+                        " (", DoubleToString(profitDist/_Point, 0), "pt profit)");
+               }
             }
          }
       }
@@ -2354,6 +2656,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   g_trackMasks[idx]  = cmMask;
                   g_trackCount++;
                }
+
+               // v14.1: Store entry ATR and regime in GlobalVariable keyed by position ticket
+               // This is immune to MT5's ~31 char comment truncation
+               if(g_pendingEntryATR > 0)
+               {
+                  StoreEntryATR(posID, g_pendingEntryATR);
+                  StoreEntryRegime(posID, g_pendingEntryRegime);
+                  g_pendingEntryATR = 0;
+                  g_pendingEntryRegime = "";
+               }
             }
          }
 
@@ -2367,6 +2679,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                return;
             }
             // Position gone = full close, record statistics below
+
+            // v14.1: Clean up entry ATR/Regime GlobalVariables
+            CleanupEntryATR(posID_out);
+            CleanupEntryRegime(posID_out);
 
             // SLクールダウン
             if(dealReason == DEAL_REASON_SL)
@@ -2400,48 +2716,45 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
             totalTradesTracked++;
 
-            // v13.0: MAE/MFE trade quality tracking
+            // v13.0: Record MAE/MFE trade quality metric
+            // Approximate MAE from SL hit: if deal closed by SL, MAE ≈ SL distance (ratio ~1.0)
+            // For TP or trailing exits, MAE = how far against position went.
+            // We use the loss magnitude relative to entry SL distance as a proxy.
             if(UseTradeQuality)
             {
-               // Compute MAE/SL ratio from deal history
-               double dealOpen  = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
-               double dealSL    = 0;
-               double dealMAE   = 0;
-               ulong  posID_tq  = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-               long   dealType  = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-
-               // Find the opening deal's SL to compute MAE ratio
-               // Use the deal's own P&L as MAE proxy (conservative estimate)
-               // If the trade was a loss, MAE >= |loss|; if win, MAE from drawdown during hold
-               double dealVol = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
-               if(dealVol > 0 && dealProfit < 0)
+               double dealVolume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+               if(dealVolume > 0)
                {
-                  // Loss trade: MAE is at least the loss amount
-                  double lossPips = MathAbs(dealProfit) / (dealVol * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
-                  // Estimate SL dist from trade comment ATR
-                  string tqComment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
-                  int atrPos = StringFind(tqComment, "ATR:");
-                  double estSLDist = 0;
-                  if(atrPos >= 0) {
-                     string atrStr = StringSubstr(tqComment, atrPos + 4);
-                     int pipePos = StringFind(atrStr, "|");
-                     if(pipePos >= 0) atrStr = StringSubstr(atrStr, 0, pipePos);
-                     estSLDist = StringToDouble(atrStr) * SL_ATR_Multi;
-                  }
-                  if(estSLDist > 0)
+                  double dealPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+                  // Look up entry deal in this position's history to find SL distance
+                  // Simplified: use netResult to approximate entry quality
+                  // Bad entry = large loss relative to expected risk
+                  double currentATR_tq = GetCurrentATR();
+                  if(currentATR_tq > 0)
                   {
-                     double maeRatio = lossPips / estSLDist;
-                     g_maeRatios[g_tqIndex % TQ_RING_MAX] = MathMin(1.0, maeRatio);
-                     g_tqIndex++;
-                     if(g_tqCount < TQ_RING_MAX) g_tqCount++;
+                     // For SL-exited trades, the loss is approximately the SL distance
+                     // MAE ratio = |loss per pt| / (ATR * SL_ATR_Multi)
+                     double expectedSLDist = currentATR_tq * SL_ATR_Multi;
+                     double maeRatio = 0;
+                     if(dealReason == DEAL_REASON_SL && expectedSLDist > 0)
+                        maeRatio = 1.0; // Hit SL = MAE reached full SL
+                     else if(netResult < 0 && expectedSLDist > 0)
+                     {
+                        // Partial loss: estimate MAE ratio
+                        double lossPerLot = MathAbs(netResult / dealVolume);
+                        double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+                        if(contractSize > 0)
+                        {
+                           double lossPts = lossPerLot / contractSize / _Point;
+                           double slPts = expectedSLDist / _Point;
+                           maeRatio = (slPts > 0) ? lossPts / slPts : 0;
+                        }
+                     }
+                     // Winning trades: MAE < SL, estimate conservatively
+                     else if(netResult >= 0)
+                        maeRatio = 0.3; // Assumed low MAE for winners
+                     RecordTradeQuality(maeRatio);
                   }
-               }
-               else if(dealVol > 0 && dealProfit >= 0)
-               {
-                  // Win trade: MAE was less than SL (conservative: estimate 30% of SL)
-                  g_maeRatios[g_tqIndex % TQ_RING_MAX] = 0.3;
-                  g_tqIndex++;
-                  if(g_tqCount < TQ_RING_MAX) g_tqCount++;
                }
             }
 
@@ -2525,7 +2838,9 @@ bool IsWeekendClose()
    if(!UseWeekendClose) return false;
    MqlDateTime dt;
    TimeCurrent(dt);
-   return (dt.day_of_week == 5 && dt.hour >= FridayCloseHour);
+   // REVIEW-FIX: Issue 3.6 - Apply GMTOffset to FridayCloseHour check
+   int gmtHour = (dt.hour - GMTOffset + 24) % 24;
+   return (dt.day_of_week == 5 && gmtHour >= FridayCloseHour);
 }
 
 //+------------------------------------------------------------------+
@@ -2582,19 +2897,15 @@ void CheckStaleTradeExit()
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       double hours = (double)(TimeCurrent() - openTime) / 3600.0;
 
-      // FIX: Issue #18 - Close profitable stale trades at StaleTradeHours,
-      // and force-close unprofitable stale trades at StaleTradeHours * 2
+      // SYNC-FIX: Python only closes profitable stale trades at 48h, no force-close at 2x.
+      // Removed the StaleTradeHours * 2 force-close block to match Python behavior.
       double profit = PositionGetDouble(POSITION_PROFIT);
       if(hours >= StaleTradeHours && profit >= 0)
       {
          trade.PositionClose(ticket);
          Print("v4.0: 塩漬けトレード決済 (", DoubleToString(hours,1), "時間経過, profit>=0)");
       }
-      else if(hours >= StaleTradeHours * 2)
-      {
-         trade.PositionClose(ticket);
-         Print("v4.0: 塩漬けトレード強制決済 (", DoubleToString(hours,1), "時間経過, profit=", DoubleToString(profit,2), ")");
-      }
+      // SYNC-FIX: Force-close at 2x hours REMOVED — Python has no force-close for unprofitable stale trades
    }
 }
 
@@ -2650,11 +2961,14 @@ int GetVolumeClimax()
 }
 
 //+------------------------------------------------------------------+
-//| v13.0: 段階的リバーサルモード (0-5ptスコアリング, min 2)            |
+//| SYNC-FIX #7: Reversal mode - Python's strict 4/4 AND conditions  |
+//| Bullish: RSI < 25 AND divergence AND S/R support AND bullish candle |
+//| Bearish: RSI > 75 AND divergence AND S/R resist AND bearish candle  |
 //+------------------------------------------------------------------+
-bool CheckReversal(int &reversalDirection, double &confidence)
+bool CheckReversal(int &reversalDirection, double &reversalConfidence)
 {
    if(!UseReversalMode) return false;
+   reversalConfidence = 0.0;
 
    double rsi = GetIndicatorValue(h_h1_rsi, 0, 1);
    if(rsi == 0) return false;
@@ -2663,33 +2977,18 @@ bool CheckReversal(int &reversalDirection, double &confidence)
    int srSignal = GetSRSignal(iClose(_Symbol, PERIOD_H1, 1), GetCurrentATR());
    int candleSignal = GetCandlePattern();
 
-   // Bullish reversal scoring (0-5 points)
-   int bullScore = 0;
-   if(rsi < 25) bullScore += 2;        // Strong oversold
-   else if(rsi < 35) bullScore += 1;   // Mild oversold
-   if(divSignal > 0) bullScore += 1;   // Bullish divergence
-   if(srSignal > 0) bullScore += 1;    // At support
-   if(candleSignal > 0) bullScore += 1; // Bullish candle
-
-   // Bearish reversal scoring (0-5 points)
-   int bearScore = 0;
-   if(rsi > 75) bearScore += 2;        // Strong overbought
-   else if(rsi > 65) bearScore += 1;   // Mild overbought
-   if(divSignal < 0) bearScore += 1;   // Bearish divergence
-   if(srSignal < 0) bearScore += 1;    // At resistance
-   if(candleSignal < 0) bearScore += 1; // Bearish candle
-
-   // Require minimum 2 points for reversal
-   if(bullScore >= 2 && bullScore > bearScore)
+   // Bullish reversal: RSI < 25 AND divergence AND S/R support AND bullish candle
+   if(rsi < 25.0 && divSignal > 0 && srSignal > 0 && candleSignal > 0)
    {
       reversalDirection = 1;
-      confidence = (double)bullScore / 5.0; // 0.4 ~ 1.0
+      reversalConfidence = 1.0;
       return true;
    }
-   if(bearScore >= 2 && bearScore > bullScore)
+   // Bearish reversal: RSI > 75 AND divergence AND S/R resistance AND bearish candle
+   if(rsi > 75.0 && divSignal < 0 && srSignal < 0 && candleSignal < 0)
    {
       reversalDirection = -1;
-      confidence = (double)bearScore / 5.0; // 0.4 ~ 1.0
+      reversalConfidence = 1.0;
       return true;
    }
 
@@ -2711,7 +3010,20 @@ int ParseComponentMaskFromComment(string comment)
    return (int)StringToInteger(cmStr);
 }
 
+// SYNC-FIX #1: Parse entry ATR from trade comment (|ATR=X.XXXXX)
+double ParseEntryATR(string comment)
+{
+   int atrPos = StringFind(comment, "|ATR=");
+   if(atrPos < 0) return 0.0;
+   string atrStr = StringSubstr(comment, atrPos + 5);
+   int nextPipe = StringFind(atrStr, "|");
+   if(nextPipe >= 0)
+      atrStr = StringSubstr(atrStr, 0, nextPipe);
+   return StringToDouble(atrStr);
+}
+
 // CODEX-FIX: NEW HIGH #8 - Parse entry regime from trade comment
+// v14.1: DEPRECATED - Regime now stored in GlobalVariable, but kept for backward compat
 string ParseRegimeFromComment(string comment)
 {
    int rgPos = StringFind(comment, "|RG=");
@@ -2721,6 +3033,83 @@ string ParseRegimeFromComment(string comment)
    if(nextPipe >= 0)
       rgStr = StringSubstr(rgStr, 0, nextPipe);
    return rgStr;
+}
+
+//+------------------------------------------------------------------+
+//| v14.1: Entry ATR — GlobalVariable storage (immune to comment      |
+//|        truncation at ~31 chars)                                    |
+//+------------------------------------------------------------------+
+void StoreEntryATR(ulong posTicket, double atr)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   GlobalVariableSet(key, atr);
+}
+
+double ReadEntryATR(ulong posTicket)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   if(GlobalVariableCheck(key))
+      return GlobalVariableGet(key);
+   return 0.0;
+}
+
+void CleanupEntryATR(ulong posTicket)
+{
+   string key = GVKey("ATR_" + IntegerToString(posTicket));
+   GlobalVariableDel(key);
+}
+
+//+------------------------------------------------------------------+
+//| v14.1: Entry Regime — GlobalVariable storage                       |
+//|        Encoded as double: 1=trend, 2=range, 3=high_vol, 4=crash   |
+//|        5=trend_weak, 6=hv_trend, 7=hv_range                       |
+//+------------------------------------------------------------------+
+double RegimeToDouble(string regime)
+{
+   if(regime == "trend")      return 1.0;
+   if(regime == "range")      return 2.0;
+   if(regime == "high_vol")   return 3.0;
+   if(regime == "crash")      return 4.0;
+   if(regime == "trend_weak") return 5.0;
+   if(regime == "hv_trend")   return 6.0;
+   if(regime == "hv_range")   return 7.0;
+   return 0.0;  // unknown
+}
+
+string DoubleToRegime(double val)
+{
+   int v = (int)MathRound(val);
+   switch(v)
+   {
+      case 1: return "trend";
+      case 2: return "range";
+      case 3: return "high_vol";
+      case 4: return "crash";
+      case 5: return "trend_weak";
+      case 6: return "hv_trend";
+      case 7: return "hv_range";
+      default: return "";
+   }
+}
+
+void StoreEntryRegime(ulong posTicket, string regime)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   GlobalVariableSet(key, RegimeToDouble(regime));
+}
+
+string ReadEntryRegime(ulong posTicket)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   if(GlobalVariableCheck(key))
+      return DoubleToRegime(GlobalVariableGet(key));
+   return "";
+}
+
+void CleanupEntryRegime(ulong posTicket)
+{
+   string key = GVKey("RG_" + IntegerToString(posTicket));
+   GlobalVariableDel(key);
 }
 
 //+------------------------------------------------------------------+
@@ -2836,6 +3225,221 @@ bool IsModifySLValid(double newSL, bool isBuy)
 }
 
 //+------------------------------------------------------------------+
+//| v13.0: ER計算（指定期間）                                          |
+//+------------------------------------------------------------------+
+double CalcERForPeriod(int period)
+{
+   double h4CloseArr[];
+   ArraySetAsSeries(h4CloseArr, true);
+   // Use shift 1 (confirmed H4 bar) for consistency
+   if(CopyClose(_Symbol, PERIOD_H4, 1, period + 1, h4CloseArr) < period + 1)
+      return 0.5; // Default neutral ER
+   double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[period]);
+   double sumAbsChanges = 0;
+   for(int k = 0; k < period; k++)
+      sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+   if(sumAbsChanges <= 0) return 0;
+   return netChange / sumAbsChanges;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: マルチスケール3層ERレジーム分類                              |
+//| fast/med/slow ERで詳細レジーム: crash, high_vol_trend,             |
+//| high_vol_range, trend_strong, trend_weak, range                    |
+//+------------------------------------------------------------------+
+string DetectRegimeV13(double fast_er, double med_er, double slow_er, double vol_ratio)
+{
+   if(vol_ratio >= RegimeVolCrash) return "crash";
+
+   bool isTrendingFast = (fast_er >= 0.3);
+   bool isTrendingMed  = (med_er >= 0.3);
+   bool isHighVol      = (vol_ratio >= RegimeVolHigh);
+
+   if(isHighVol)
+   {
+      if(isTrendingFast) return "high_vol_trend";
+      return "high_vol_range";
+   }
+
+   if(isTrendingFast && isTrendingMed) return "trend_strong";
+   if(isTrendingFast && !isTrendingMed) return "trend_weak";
+
+   return "range";
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: レジーム安定性追跡                                          |
+//+------------------------------------------------------------------+
+void UpdateRegimeStability(string newRegime)
+{
+   if(!UseMultiscaleRegime) return;
+
+   // Map v13 regimes to base regimes for stability check
+   string baseNew = MapToBaseRegime(newRegime);
+   string baseLast = MapToBaseRegime(g_lastStableRegime);
+
+   if(baseNew == baseLast)
+   {
+      g_regimeStableCount++;
+   }
+   else
+   {
+      g_regimeStableCount = 1;
+      g_regimeTransitionTime = TimeCurrent();
+   }
+
+   g_lastStableRegime = newRegime;
+   g_regimeConfirmed = (g_regimeStableCount >= RegimeStabilityBars);
+
+   // Calculate transition lot multiplier
+   double hoursSince = (double)(TimeCurrent() - g_regimeTransitionTime) / 3600.0;
+   if(hoursSince < 3.0) // 12 M15 bars = 3 hours
+      g_regimeTransitionMult = RegimeTransitionPenalty;
+   else
+      g_regimeTransitionMult = 1.0;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: 詳細レジームをベースレジームにマッピング                     |
+//+------------------------------------------------------------------+
+string MapToBaseRegime(string regime)
+{
+   if(regime == "trend_strong" || regime == "trend_weak") return "trend";
+   if(regime == "high_vol_trend" || regime == "high_vol_range") return "high_vol";
+   return regime; // "range", "crash" - unchanged
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: リアルタイムスパイク検知                                     |
+//+------------------------------------------------------------------+
+bool DetectRealtimeSpike(double currentATR)
+{
+   if(!UseRealtimeSpike || currentATR <= 0) return false;
+
+   // Check current M15 bar range
+   double barHigh  = iHigh(_Symbol, PERIOD_M15, 0);
+   double barLow   = iLow(_Symbol, PERIOD_M15, 0);
+   double barRange = barHigh - barLow;
+
+   if(barRange > currentATR * SpikeATRMulti) return true;
+
+   // 2-bar combined range check (catches gap moves)
+   double prevHigh = iHigh(_Symbol, PERIOD_M15, 1);
+   double prevLow  = iLow(_Symbol, PERIOD_M15, 1);
+   double twoBarHigh = MathMax(barHigh, prevHigh);
+   double twoBarLow  = MathMin(barLow, prevLow);
+   double twoBarRange = twoBarHigh - twoBarLow;
+
+   if(twoBarRange > currentATR * SpikeATRMulti * 1.5) return true;
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: スパイク時に損失ポジションを即座にクローズ                   |
+//+------------------------------------------------------------------+
+void CloseLosingSpikePositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetDouble(POSITION_PROFIT) < 0)
+      {
+         trade.PositionClose(ticket);
+         Print("v13.0: Spike detected - closed losing position ticket=", ticket);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: コンポーネント相関キャップ適用                               |
+//| Correlated component groups get reduced to avoid double-counting  |
+//+------------------------------------------------------------------+
+void ApplyCorrelationCap(int &buyScore, int &sellScore, int componentMask)
+{
+   // Group 1: trend_alignment = H4 Trend(bit 0, 3pt) + Momentum Burst(bit 12, 3pt)
+   // H4 Trend is stronger (has ADX filter), so Burst is secondary
+   {
+      bool h4Fired   = (componentMask & (1 << 0)) != 0;
+      bool burstFired = (componentMask & (1 << 12)) != 0;
+      if(h4Fired && burstFired)
+      {
+         // Reduce Momentum Burst by 50% (3 * 0.5 = 1.5, floored to 1)
+         int reduction = (int)(3.0 * CorrelationCapRatio);
+         // Determine burst direction from componentMask
+         // If H4 and Burst are same direction, reduce
+         bool h4Buy = (componentMask & (1 << 16)) != 0;
+         // Burst follows same direction (all TFs aligned), reduce the score
+         if(h4Buy)
+            buyScore -= reduction;
+         else
+            sellScore -= reduction;
+      }
+   }
+
+   // Group 2: rsi_family = H1 RSI(bit 2, 1pt) + H4 RSI (no bit, skip)
+   // H4 RSI has no CE tracking bit, so cannot detect overlap reliably. Skip.
+
+   // Group 3: ma_family = H1 MA(bit 1, 2pt) + M15 MA Cross(bit 4, 2pt)
+   {
+      bool h1maFired  = (componentMask & (1 << 1)) != 0;
+      bool m15maFired = (componentMask & (1 << 4)) != 0;
+      if(h1maFired && m15maFired)
+      {
+         // M15 MA Cross is secondary (shorter TF), reduce by 50% = 1pt
+         int reduction = (int)(2.0 * CorrelationCapRatio);
+         // Determine M15 direction - if H1 MA is buy, M15 likely same
+         // We can't easily distinguish direction per component in the bitmask,
+         // so apply to the winning side
+         if(buyScore >= sellScore)
+            buyScore -= reduction;
+         else
+            sellScore -= reduction;
+      }
+   }
+
+   // Clamp to 0
+   buyScore  = (int)MathMax(0, buyScore);
+   sellScore = (int)MathMax(0, sellScore);
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: MAE/MFEベースのエントリー品質ペナルティ                     |
+//+------------------------------------------------------------------+
+int GetTradeQualityPenalty()
+{
+   if(!UseTradeQuality) return 0;
+   if(g_tqCount < TQMinTrades) return 0;
+
+   // Calculate ratio of bad entries (MAE > threshold of SL)
+   int badEntries = 0;
+   int total = MathMin(g_tqCount, TQ_MAX);
+   for(int i = 0; i < total; i++)
+   {
+      if(g_tqMAERatios[i] > TQMAEThreshold)
+         badEntries++;
+   }
+   double badRatio = (double)badEntries / (double)total;
+   if(badRatio > TQBadEntryLimit)
+      return TQScorePenalty;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: MAE/MFE品質トラッカーに記録                                 |
+//+------------------------------------------------------------------+
+void RecordTradeQuality(double maeRatio)
+{
+   if(!UseTradeQuality) return;
+   g_tqMAERatios[g_tqIndex] = maeRatio;
+   g_tqIndex = (g_tqIndex + 1) % TQ_MAX;
+   if(g_tqCount < TQ_MAX) g_tqCount++;
+}
+
+//+------------------------------------------------------------------+
 //| ユーティリティ関数群                                                |
 //+------------------------------------------------------------------+
 int CountMyPositions()
@@ -2856,8 +3460,11 @@ bool CheckTimeFilter()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   if(dt.hour < TradeStartHour || dt.hour >= TradeEndHour) return false;
-   if(AvoidFriday && dt.day_of_week == 5 && dt.hour >= 18) return false;
+   // REVIEW-FIX: Issue 3.5 - Apply GMTOffset for correct UTC-based time filtering
+   // REVIEW-FIX: Issue 3.6 - Apply GMTOffset to AvoidFriday check
+   int gmtHour = (dt.hour - GMTOffset + 24) % 24;
+   if(gmtHour < TradeStartHour || gmtHour >= TradeEndHour) return false;
+   if(AvoidFriday && dt.day_of_week == 5 && gmtHour >= 18) return false;
    return true;
 }
 

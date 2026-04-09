@@ -1,3 +1,5 @@
 __pycache__/
-.claude/worktrees/
-test_highvol_pyramid*.py
+
+# External libraries and references
+reference/
+libs/
