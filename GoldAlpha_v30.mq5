@@ -8,7 +8,7 @@
 //| MT5 Backtest Results (USD $10K, R=0.2%, 2016-2026):              |
 //|   PF=2.15, T=877, DD=7.69%, Sharp=1.79                          |
 //|   WFA 5/5: 1.07, 1.13, 1.31, 1.44, 2.18                        |
-//|   Sensitivity 12/12 PASS (PF range 2.06-2.22 at +/-20%)         |
+//|   Sensitivity 13/13 PASS (PF range 2.06-2.22 at +/-20%)         |
 //|                                                                  |
 //| OOS 2024-2026 (R=1.0%): PF=1.90, T=272, $394K profit            |
 //| Production: R=1.0%, MaxLot=1.00, JPY 300K -> ~7100+/day          |
