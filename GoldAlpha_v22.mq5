@@ -1,21 +1,18 @@
 //+------------------------------------------------------------------+
-//| GoldAlpha_v22.mq5 - v12-Base Comprehensive Grid Optimization     |
-//| Strategy: v12 base + D1 regime + wider SL/Trail + fast BE        |
-//| Key params (vs v21):                                             |
-//|   - SL_ATR_Mult: 3.8 -> 4.0 (wider SL)                         |
-//|   - Trail_ATR: 4.4 -> 4.9 (wider trail, let winners run)        |
-//|   - BE_ATR: 0.2 -> 0.3 (slightly less aggressive BE)            |
-//|   - EMA_Zone_ATR: 0.65 -> 0.30 (tighter EMA proximity)          |
-//|   - D1_Tolerance: 0.007 -> 0.010 (more relaxed D1)              |
-//|   - MaxPositions: 5 -> 6                                         |
-//|   - D1 Regime: same (D1 slope >= 0.2% over 5 bars)              |
-//| Results (Python BT, 0.2% risk, 2016-2026):                      |
-//|   PF=3.20, 1598T, DD=29.4%, WR=68.2%                            |
-//|   WFA: 5/8 PASS                                                  |
-//|   OOS 2024-2026 Risk=1.5%: PF=10.49, Daily=6,160 JPY            |
-//| WARNING: 4/10 years losing (2016,2018,2021,2022)                 |
-//|   Trend-following - vulnerable to ranging markets                 |
-//|   MT5 real-tick validation required before live                   |
+//| GoldAlpha_v22.mq5 - v12-Base MT5-Validated "Variant B"           |
+//| Strategy: v12 base + moderate SL/Trail widening + D1 regime      |
+//| MT5 Real-Tick Results (USD $10K, Risk=0.5%, 2016-2026):          |
+//|   PF=1.75, 1325T, DD=15.6%, WR=75%, Sharp=0.96                  |
+//|   WFA: 4/5 PASS (only 2016-2017 FAIL)                           |
+//|   OOS 2024-2026 ($2K): PF=2.43, 331T, Daily=$94/¥14,147         |
+//| Key params (vs v12 default):                                     |
+//|   - SL_ATR_Mult: 2.0 -> 2.5 (moderate widening)                 |
+//|   - Trail_ATR: 2.5 -> 3.0 (wider trail)                         |
+//|   - BE_ATR: 1.5 -> 1.0 (faster breakeven)                       |
+//|   - MaxPositions: 2 -> 3                                         |
+//|   - D1_Tolerance: 0.003 -> 0.005                                |
+//|   - D1 Regime: D1 EMA slope >= 0.2% over 5 bars                 |
+//|   - RiskPct: 0.5% recommended for $2K/300K JPY                  |
 //+------------------------------------------------------------------+
 #property copyright "Test"
 #property version   "22.00"
@@ -34,17 +31,17 @@ input int      ATR_Period    = 14;
 input int      ATR_SMA       = 50;
 
 // --- Risk ---
-input double   SL_ATR_Mult   = 4.0;
-input double   Trail_ATR     = 4.9;
-input double   BE_ATR        = 0.3;
-input double   RiskPct       = 1.5;
+input double   SL_ATR_Mult   = 2.5;
+input double   Trail_ATR     = 3.0;
+input double   BE_ATR        = 1.0;
+input double   RiskPct       = 0.5;
 input double   BodyRatio     = 0.32;
 
 // --- Entry Filters ---
-input double   EMA_Zone_ATR  = 0.30;
-input double   ATR_Filter    = 0.70;
-input double   D1_Tolerance  = 0.010;
-input int      MaxPositions  = 6;
+input double   EMA_Zone_ATR  = 0.40;
+input double   ATR_Filter    = 0.60;
+input double   D1_Tolerance  = 0.005;
+input int      MaxPositions  = 3;
 
 // --- D1 Regime Filter ---
 input int      D1_Slope_Bars  = 5;
@@ -52,7 +49,7 @@ input double   D1_Min_Slope   = 0.002;
 
 // --- General ---
 input double   MinLot        = 0.01;
-input double   MaxLot        = 0.50;
+input double   MaxLot        = 0.15;
 input int      MagicNumber   = 330022;
 
 CTrade trade;
