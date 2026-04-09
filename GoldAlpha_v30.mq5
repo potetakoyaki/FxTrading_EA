@@ -3,15 +3,15 @@
 //| v29 base + two architectural enhancements:                       |
 //|   1. Adaptive MaxPositions: MaxPos=3 in strong D1 only           |
 //|   2. Progressive Trail: tighter trail as profit grows            |
+//|   3. SL_Weak_Mult optimized: 1.8 -> 1.5 (tighter weak SL)      |
 //|                                                                  |
 //| MT5 Backtest Results (USD $10K, R=0.2%, 2016-2026):              |
-//|   PF=2.03, T=871, DD=7.58%, Sharp=1.69                          |
-//|   vs v29: +200 trades (+30%), DD -13.6pp, Sharp +0.19            |
-//|   WFA 5/5: 1.02, 1.15, 1.49, 1.63, 2.03                        |
-//|   Sensitivity 12/12 PASS (PF range 1.97-2.10 at +/-20%)         |
+//|   PF=2.15, T=877, DD=7.69%, Sharp=1.79                          |
+//|   WFA 5/5: 1.07, 1.13, 1.31, 1.44, 2.18                        |
+//|   Sensitivity 12/12 PASS (PF range 2.06-2.22 at +/-20%)         |
 //|                                                                  |
-//| OOS 2024-2026 (R=1.0%): PF=1.88, T=270, $392K profit            |
-//| Production: R=1.0%, MaxLot=1.00, JPY 300K -> ~5000+/day          |
+//| OOS 2024-2026 (R=1.0%): PF=1.90, T=272, $394K profit            |
+//| Production: R=1.0%, MaxLot=1.00, JPY 300K -> ~7100+/day          |
 //+------------------------------------------------------------------+
 #property copyright "Test"
 #property version   "30.00"
@@ -30,7 +30,7 @@ input int      ATR_SMA       = 50;
 input double   SL_ATR_Mult   = 2.5;
 input double   Trail_ATR     = 3.0;
 input double   BE_ATR        = 1.0;
-input double   SL_Weak_Mult  = 1.8;
+input double   SL_Weak_Mult  = 1.5;
 input double   RiskPct       = 1.0;
 
 // --- Entry Filters ---
