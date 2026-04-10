@@ -24,7 +24,7 @@ input double   SL_ATR_Mult   = 2.5;
 input double   Trail_ATR     = 3.0;
 input double   BE_ATR        = 1.0;
 input double   SL_Weak_Mult  = 1.5;
-input double   RiskPct       = 1.0;
+input double   RiskPct       = 0.5;
 
 // --- Entry Filters ---
 input double   BodyRatio     = 0.32;
@@ -76,7 +76,7 @@ input int      DDCooldownBars    = 10;     // H4 bars to wait after DD breach
 
 // --- General ---
 input double   MinLot        = 0.01;
-input double   MaxLot        = 1.00;
+input double   MaxLot        = 0.50;
 input int      MagicNumber   = 330030;
 
 CTrade trade;
