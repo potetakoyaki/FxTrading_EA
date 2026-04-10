@@ -62,8 +62,10 @@ input bool     CheckBar3Strong  = true;  // Check bar 3 in very strong D1
 
 // --- Adaptive MaxPositions ---
 input bool     UseAdaptiveMaxPos = true;   // Enable adaptive max positions
-input int      MaxPos_Strong     = 3;    // MaxPositions in strong D1 regime
+input int      MaxPos_Strong     = 2;    // MaxPositions in strong D1 regime (was 3)
 input int      MaxPos_Weak       = 2;    // MaxPositions in weak D1 regime
+input double   Pos2_RiskScale    = 1.0;  // 2nd position risk multiplier (1.0=full)
+input int      MinEntryGapBars   = 0;    // Min H4 bars between entries (0=off)
 
 // --- Crash Protection ---
 input bool     UseSpreadFilter   = true;   // Block entry on wide spread
@@ -365,16 +367,32 @@ void OnTick()
       }
    }
 
+   // --- Entry gap enforcement: min H4 bars between entries ---
+   if(pc > 0 && lastEntryTime > 0)
+   {
+      if(TimeCurrent() < lastEntryTime + MinEntryGapBars * 4 * 3600)
+         return;
+   }
+
+   // --- Risk scaling: reduce lot for 2nd position ---
+   double riskScale = (pc >= 1) ? Pos2_RiskScale : 1.0;
+
    if(buySignal)
    {
       double sd=slMult*av;
-      trade.Buy(CalcLot(sd),_Symbol,ask,NormalizeDouble(ask-sd,_Digits),0,"A30 BUY");
+      double lot = CalcLot(sd);
+      lot = MathFloor(lot * riskScale / 0.01) * 0.01;
+      lot = MathMax(lot, MinLot);
+      trade.Buy(lot,_Symbol,ask,NormalizeDouble(ask-sd,_Digits),0,"A30 BUY");
       lastEntryTime = TimeCurrent();
    }
    if(sellSignal)
    {
       double sd=slMult*av;
-      trade.Sell(CalcLot(sd),_Symbol,bid,NormalizeDouble(bid+sd,_Digits),0,"A30 SELL");
+      double lot = CalcLot(sd);
+      lot = MathFloor(lot * riskScale / 0.01) * 0.01;
+      lot = MathMax(lot, MinLot);
+      trade.Sell(lot,_Symbol,bid,NormalizeDouble(bid+sd,_Digits),0,"A30 SELL");
       lastEntryTime = TimeCurrent();
    }
 }
