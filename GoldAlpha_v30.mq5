@@ -1,17 +1,10 @@
 //+------------------------------------------------------------------+
 //| GoldAlpha_v30.mq5 - Adaptive MaxPos + Progressive Trail          |
-//| v29 base + two architectural enhancements:                       |
+//| v29 base + enhancements:                                        |
 //|   1. Adaptive MaxPositions: MaxPos=3 in strong D1 only           |
 //|   2. Progressive Trail: tighter trail as profit grows            |
-//|   3. SL_Weak_Mult optimized: 1.8 -> 1.5 (tighter weak SL)      |
-//|                                                                  |
-//| MT5 Backtest Results (USD $10K, R=0.2%, 2016-2026):              |
-//|   PF=2.15, T=877, DD=7.69%, Sharp=1.79                          |
-//|   WFA 5/5: 1.07, 1.13, 1.31, 1.44, 2.18                        |
-//|   Sensitivity 13/13 PASS (PF range 2.06-2.22 at +/-20%)         |
-//|                                                                  |
-//| OOS 2024-2026 (R=1.0%): PF=1.90, T=272, $394K profit            |
-//| Production: R=1.0%, MaxLot=1.00, JPY 300K -> ~7100+/day          |
+//|   3. SL_Weak_Mult=1.5 (tighter weak SL)                        |
+//|   4. Crash Protection: spread filter, high-vol block, DD guard   |
 //+------------------------------------------------------------------+
 #property copyright "Test"
 #property version   "30.00"
@@ -72,6 +65,15 @@ input bool     UseAdaptiveMaxPos = true;   // Enable adaptive max positions
 input int      MaxPos_Strong     = 3;    // MaxPositions in strong D1 regime
 input int      MaxPos_Weak       = 2;    // MaxPositions in weak D1 regime
 
+// --- Crash Protection ---
+input bool     UseSpreadFilter   = true;   // Block entry on wide spread
+input double   MaxSpreadATR      = 0.15;   // Max spread as fraction of ATR
+input bool     UseHighVolBlock   = true;   // Block entry on extreme volatility
+input double   MaxATR_Ratio      = 2.0;    // Max ATR / avgATR ratio for entry
+input bool     UseDDGuard        = true;   // Equity drawdown circuit breaker
+input double   MaxDD_Pct         = 15.0;   // Stop new entries if DD exceeds this %
+input int      DDCooldownBars    = 10;     // H4 bars to wait after DD breach
+
 // --- General ---
 input double   MinLot        = 0.01;
 input double   MaxLot        = 1.00;
@@ -80,6 +82,10 @@ input int      MagicNumber   = 330030;
 CTrade trade;
 int hW1Fast, hW1Slow, hD1EMA, hH4EMA, hATR;
 datetime lastEntryTime = 0;
+
+// DD Guard state
+double peakEquity = 0;
+datetime ddBreachTime = 0;
 
 int OnInit()
 {
@@ -91,6 +97,8 @@ int OnInit()
    hATR    = iATR(_Symbol, PERIOD_H4, ATR_Period);
    if(hW1Fast==INVALID_HANDLE||hW1Slow==INVALID_HANDLE||hD1EMA==INVALID_HANDLE||hH4EMA==INVALID_HANDLE||hATR==INVALID_HANDLE)
       return INIT_FAILED;
+   peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   ddBreachTime = 0;
    return INIT_SUCCEEDED;
 }
 
@@ -235,6 +243,37 @@ void OnTick()
    MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
    if(dt.day_of_week==0||dt.day_of_week==6)return; if(dt.day_of_week==5&&dt.hour>16)return;
 
+   // === CRASH PROTECTION ===
+
+   // 1. DD Guard: track peak equity, block entries during drawdown
+   if(UseDDGuard)
+   {
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(equity > peakEquity) peakEquity = equity;
+      if(peakEquity > 0)
+      {
+         double currentDD = (peakEquity - equity) / peakEquity * 100.0;
+         if(currentDD >= MaxDD_Pct)
+         {
+            if(ddBreachTime == 0) ddBreachTime = TimeCurrent();
+            // Block during cooldown period, then reset peak and resume
+            if(TimeCurrent() < ddBreachTime + DDCooldownBars * 4 * 3600)
+               return; // still in cooldown, block entries
+            // Cooldown expired: reset peak to current equity and resume trading
+            peakEquity = equity;
+            ddBreachTime = 0;
+            // fall through to allow entry
+         }
+         else if(ddBreachTime > 0)
+         {
+            // DD recovered below threshold during cooldown
+            if(TimeCurrent() < ddBreachTime + DDCooldownBars * 4 * 3600)
+               return;
+            ddBreachTime = 0; // cooldown over, reset
+         }
+      }
+   }
+
    // D1 regime: reject ranging markets
    double d1slope = GetD1Slope();
    if(d1slope < D1_Min_Slope) return;
@@ -267,6 +306,16 @@ void OnTick()
    double a[1]; if(CopyBuffer(hATR,0,1,1,a)<1)return;
    double av=a[0]; if(av<_Point)return;
    double aa=GetAvgATR(); if(aa<=0||av<aa*ATR_Filter)return;
+
+   // 2. High Volatility Block: reject when ATR is extreme (crash/spike)
+   if(UseHighVolBlock && av > aa * MaxATR_Ratio) return;
+
+   // 3. Spread Filter: reject when spread is abnormally wide
+   if(UseSpreadFilter)
+   {
+      double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(spread > MaxSpreadATR * av) return;
+   }
 
    double h4e[1]; if(CopyBuffer(hH4EMA,0,1,1,h4e)<1)return;
 
