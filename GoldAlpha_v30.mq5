@@ -67,6 +67,11 @@ input int      MaxPos_Weak       = 2;    // MaxPositions in weak D1 regime
 input double   Pos2_RiskScale    = 1.0;  // 2nd position risk multiplier (1.0=full)
 input int      MinEntryGapBars   = 0;    // Min H4 bars between entries (0=off)
 
+// --- Small Account Mode ---
+input bool     UseSmallAcctMode  = true;   // Cap SL when at MinLot
+input double   SmallAcct_MaxRisk = 5.0;    // Max risk % per trade at MinLot
+input double   SmallAcct_MinSL   = 0.50;   // Floor: min SL as ATR multiple
+
 // --- Crash Protection ---
 input bool     UseSpreadFilter   = true;   // Block entry on wide spread
 input double   MaxSpreadATR      = 0.15;   // Max spread as fraction of ATR
@@ -283,7 +288,9 @@ void OnTick()
 
    // Adaptive MaxPositions: Strong D1 -> MaxPos_Strong, Weak D1 -> MaxPos_Weak
    int effectiveMaxPos = MaxPositions;
-   if(UseAdaptiveMaxPos)
+   if(UseSmallAcctMode)
+      effectiveMaxPos = 1; // Force single position for small accounts
+   else if(UseAdaptiveMaxPos)
    {
       if(isStrong)
          effectiveMaxPos = MaxPos_Strong;
@@ -383,6 +390,23 @@ void OnTick()
       double lot = CalcLot(sd);
       lot = MathFloor(lot * riskScale / 0.01) * 0.01;
       lot = MathMax(lot, MinLot);
+
+      // Small Account SL Cap: when stuck at MinLot, cap SL to limit actual risk
+      if(UseSmallAcctMode && lot <= MinLot)
+      {
+         lot = MinLot;
+         double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+         double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         string ac = AccountInfoString(ACCOUNT_CURRENCY);
+         if(ac == "JPY" && tv < 10.0)
+         { double uj = SymbolInfoDouble("USDJPY", SYMBOL_BID); if(uj <= 0) uj = 150.0; tv *= uj; }
+         double maxLoss = eq * SmallAcct_MaxRisk / 100.0;
+         double maxSD = (tv > 0 && ts > 0) ? maxLoss * ts / tv : sd;
+         double minSD = SmallAcct_MinSL * av;
+         sd = MathMax(minSD, MathMin(sd, maxSD));
+      }
+
       trade.Buy(lot,_Symbol,ask,NormalizeDouble(ask-sd,_Digits),0,"A30 BUY");
       lastEntryTime = TimeCurrent();
    }
@@ -392,6 +416,23 @@ void OnTick()
       double lot = CalcLot(sd);
       lot = MathFloor(lot * riskScale / 0.01) * 0.01;
       lot = MathMax(lot, MinLot);
+
+      // Small Account SL Cap
+      if(UseSmallAcctMode && lot <= MinLot)
+      {
+         lot = MinLot;
+         double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+         double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         string ac = AccountInfoString(ACCOUNT_CURRENCY);
+         if(ac == "JPY" && tv < 10.0)
+         { double uj = SymbolInfoDouble("USDJPY", SYMBOL_BID); if(uj <= 0) uj = 150.0; tv *= uj; }
+         double maxLoss = eq * SmallAcct_MaxRisk / 100.0;
+         double maxSD = (tv > 0 && ts > 0) ? maxLoss * ts / tv : sd;
+         double minSD = SmallAcct_MinSL * av;
+         sd = MathMax(minSD, MathMin(sd, maxSD));
+      }
+
       trade.Sell(lot,_Symbol,bid,NormalizeDouble(bid+sd,_Digits),0,"A30 SELL");
       lastEntryTime = TimeCurrent();
    }
