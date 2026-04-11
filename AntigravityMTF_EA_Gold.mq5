@@ -320,6 +320,40 @@ const double CompEffectPenaltyWR        = 0.4;    // HARDCODED: WFA固定
 const double CompEffectBoostWeight      = 1.2;    // HARDCODED: WFA固定
 const double CompEffectPenaltyWeight    = 0.6;    // HARDCODED: WFA固定
 
+// --- v13.0 Component Correlation Cap ---
+const bool   UseCorrelationCap         = true;    // HARDCODED: WFA検証済みtrue
+const double CorrelationCapRatio       = 0.5;     // HARDCODED: 相関グループ内の2番目を50%に減衰
+
+// --- v13.0 Realtime Volatility Spike Detection ---
+const bool   UseRealtimeSpike          = true;    // HARDCODED: WFA検証済みtrue
+const double SpikeATRMulti             = 2.5;     // HARDCODED: スパイク検出閾値
+const int    SpikeCooldownBars         = 8;       // HARDCODED: スパイク後のクールダウン（M15バー）
+const bool   SpikeCloseLosing          = true;    // HARDCODED: スパイク時に含み損ポジション決済
+
+// --- v13.0 Multi-scale Regime Detection (3-layer ER) ---
+const bool   UseMultiscaleRegime       = true;    // HARDCODED: WFA検証済みtrue
+const int    RegimeERFast              = 8;       // HARDCODED: 短期ER期間
+const int    RegimeERMed               = 20;      // HARDCODED: 中期ER期間（既存と同値）
+const int    RegimeERSlow              = 40;      // HARDCODED: 長期ER期間
+const int    RegimeStabilityBars       = 3;       // HARDCODED: レジーム安定判定期間
+const double RegimeTransitionPenalty   = 0.7;     // HARDCODED: レジーム遷移時ロットペナルティ
+
+// --- v13.0 Multi-scale Regime Profiles ---
+const double TrendWeakTPMulti          = 2.5;     // HARDCODED: 弱トレンドTP倍率
+const double TrendWeakLotScale         = 0.8;     // HARDCODED: 弱トレンドロットスケール
+const int    TrendWeakMinScore         = 10;      // HARDCODED: 弱トレンド最低スコア
+const double HVTrendLotScale           = 0.4;     // HARDCODED: 高ボラトレンドロットスケール
+const double HVRangeLotScale           = 0.25;    // HARDCODED: 高ボラレンジロットスケール
+const int    HVRangeMinScore           = 14;      // HARDCODED: 高ボラレンジ最低スコア
+
+// --- v13.0 Trade Quality (MAE/MFE) Tracking ---
+const bool   UseTradeQuality           = true;    // HARDCODED: WFA検証済みtrue
+const int    TQ_Lookback               = 50;      // HARDCODED: MAE/MFE追跡トレード数
+const int    TQ_MinTrades              = 15;      // HARDCODED: 最小トレード数
+const double TQ_MAE_Threshold          = 0.7;     // HARDCODED: MAE/SL比率閾値
+const double TQ_BadEntryLimit          = 0.5;     // HARDCODED: 悪質エントリー率閾値
+const int    TQ_ScorePenalty           = 1;       // HARDCODED: スコアペナルティ
+
 //+------------------------------------------------------------------+
 //| グローバル変数                                                      |
 //+------------------------------------------------------------------+
@@ -363,6 +397,18 @@ int            g_compTotal[COMP_COUNT];    // total trades per component
 ulong          g_trackPosIDs[COMP_TRACK_MAX];   // position IDs
 int            g_trackMasks[COMP_TRACK_MAX];     // component masks at entry
 int            g_trackCount;
+// v13.0: Spike detection
+int            g_spikeCooldown;            // remaining cooldown bars after spike
+// v13.0: Multi-scale regime
+double         g_fastER;                   // H4 fast ER (8-period)
+double         g_slowER;                   // H4 slow ER (40-period)
+string         g_prevRegime;               // previous bar regime for transition detection
+int            g_regimeStableCount;        // bars since last regime change
+// v13.0: MAE/MFE trade quality tracking
+#define TQ_RING_MAX 50
+double         g_maeRatios[TQ_RING_MAX];  // MAE/SL ratios ring buffer
+int            g_tqIndex;                  // ring buffer write index
+int            g_tqCount;                  // total entries in ring buffer
 
 // v13.0: Multi-scale ER regime globals
 double         g_fastER;             // H4 fast ER (8-period)
@@ -916,8 +962,8 @@ void OnTick()
    if(climaxScore > 0)       { buyScore += (int)MathFloor(2 * ce13);  buyReasons  += "VCLX^ "; componentMask |= (1 << 13); }
    else if(climaxScore < 0)  { sellScore += (int)MathFloor(2 * ce13);  sellReasons += "VCLXv "; componentMask |= (1 << 13); }
 
-   // v11.0: Dampen trend components in range
-   if(UseV11Range && (g_currentRegime == "range" || g_isMacroRange)) {
+   // v11.0: Dampen trend components in range (v13.0: includes high_vol_range)
+   if(UseV11Range && (g_currentRegime == "range" || g_currentRegime == "high_vol_range" || g_isMacroRange)) {
       // Cap Momentum Burst (use CE-adjusted points)
       if(burstScore != 0) {
          int burstPts = (int)MathFloor(3 * ce12);
@@ -1227,6 +1273,13 @@ void OnTick()
    lot = NormalizeDouble(lot * sessLotMod, 2);
    lot = MathMax(MinLots, lot);
 
+   // v13.0: Regime transition penalty — reduce lot when regime just changed
+   if(UseMultiscaleRegime && g_regimeStableCount < RegimeStabilityBars)
+   {
+      lot = NormalizeDouble(lot * RegimeTransitionPenalty, 2);
+      lot = MathMax(MinLots, lot);
+   }
+
    // ATR spike cap
    if(g_volRatio > 2.0) {
       lot = MathMin(lot, MinLots * 3);
@@ -1235,6 +1288,20 @@ void OnTick()
    // CODEX-FIX: NEW HIGH #1 - Final lot cap after ALL multipliers (regime, session, ATR spike)
    lot = MathMin(lot, MaxLots);
    lot = MathMax(lot, MinLots);
+
+   // v13.0: Trade Quality penalty — raise MIN_SCORE if recent entries have poor MAE
+   if(UseTradeQuality && g_tqCount >= TQ_MinTrades)
+   {
+      int badCount = 0;
+      int lookback = MathMin(g_tqCount, TQ_RING_MAX);
+      for(int tqi = 0; tqi < lookback; tqi++)
+      {
+         if(g_maeRatios[tqi] >= TQ_MAE_Threshold) badCount++;
+      }
+      double badRatio = (double)badCount / lookback;
+      if(badRatio >= TQ_BadEntryLimit)
+         currentMinScore += TQ_ScorePenalty;
+   }
 
    // v8.2: High-vol pyramid block
    if(isPyramid && g_volRatio > HighVolPyramidBlock)
@@ -1361,15 +1428,55 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| v9.0: 2Dレジーム分類                                               |
+//| v9.0: 2Dレジーム分類 (v13.0: 6レジーム拡張)                        |
 //+------------------------------------------------------------------+
 string DetectRegimeV9(double h4_er_val, double vol_ratio)
 {
    if(vol_ratio >= RegimeVolCrash) return "crash";
+
+   // v13.0: Multi-scale ER for 6-regime classification
+   if(UseMultiscaleRegime)
+   {
+      bool isHighVol = (vol_ratio >= RegimeVolHigh);
+      // Use average of fast/med/slow ER for robust trend detection
+      double avgER = (g_fastER + h4_er_val + g_slowER) / 3.0;
+
+      if(isHighVol)
+      {
+         if(avgER >= RegimeERTrend) return "high_vol_trend";
+         else return "high_vol_range";
+      }
+      else
+      {
+         if(avgER >= RegimeERTrend * 1.5) return "trend_strong";
+         if(avgER >= RegimeERTrend) return "trend_weak";
+         if(vol_ratio <= RegimeVolRangeCap) return "range";
+         return "high_vol_trend"; // mid-vol with low ER
+      }
+   }
+
+   // Legacy 4-regime fallback
    if(vol_ratio >= RegimeVolHigh) return "high_vol";
    if(h4_er_val < RegimeERTrend && vol_ratio <= RegimeVolRangeCap) return "range";
    if(h4_er_val < RegimeERTrend) return "high_vol";
    return "trend";
+}
+
+//+------------------------------------------------------------------+
+//| v13.0: ER計算ヘルパー (任意期間)                                    |
+//+------------------------------------------------------------------+
+double CalcERForPeriod(int period)
+{
+   double h4CloseArr[];
+   ArraySetAsSeries(h4CloseArr, true);
+   if(CopyClose(_Symbol, PERIOD_H4, 1, period + 1, h4CloseArr) < period + 1)
+      return 0.0;
+   double netChange = MathAbs(h4CloseArr[0] - h4CloseArr[period]);
+   double sumAbsChanges = 0;
+   for(int k = 0; k < period; k++)
+      sumAbsChanges += MathAbs(h4CloseArr[k] - h4CloseArr[k+1]);
+   if(sumAbsChanges <= 0) return 0;
+   return netChange / sumAbsChanges;
 }
 
 //+------------------------------------------------------------------+
@@ -1378,19 +1485,25 @@ string DetectRegimeV9(double h4_er_val, double vol_ratio)
 double GetSessionLotModifier(string session, string regime)
 {
    if(!UseSessionRegime) return 1.0;
+   // v13.0: Map 6-regime names to 3-category for session modifier
+   string regimeCat;
+   if(regime == "trend" || regime == "trend_strong" || regime == "trend_weak") regimeCat = "trend";
+   else if(regime == "range") regimeCat = "range";
+   else regimeCat = "hv"; // high_vol, high_vol_trend, high_vol_range, crash
+
    if(session == "asian") {
-      if(regime == "trend") return SessAsianTrendLot;
-      if(regime == "range") return SessAsianRangeLot;
+      if(regimeCat == "trend") return SessAsianTrendLot;
+      if(regimeCat == "range") return SessAsianRangeLot;
       return SessAsianHVLot;
    }
    if(session == "london") {
-      if(regime == "trend") return SessLondonTrendLot;
-      if(regime == "range") return SessLondonRangeLot;
+      if(regimeCat == "trend") return SessLondonTrendLot;
+      if(regimeCat == "range") return SessLondonRangeLot;
       return SessLondonHVLot;
    }
    // NY
-   if(regime == "trend") return SessNYTrendLot;
-   if(regime == "range") return SessNYRangeLot;
+   if(regimeCat == "trend") return SessNYTrendLot;
+   if(regimeCat == "range") return SessNYRangeLot;
    return SessNYHVLot;
 }
 
@@ -2163,9 +2276,15 @@ void ManageOpenPositions()
          entryRegime = ReadEntryRegime(ticket);
          if(entryRegime == "") entryRegime = g_currentRegime;  // Fallback for old positions
 
-         if(entryRegime == "trend") {
+         // v13.0: Map 6-regime names to exit parameter category
+         if(entryRegime == "trend" || entryRegime == "trend_strong") {
             partialRatio = TrendPartialTP; beMulti = TrendBEMulti; trailMulti = TrendTrailMulti;
-         } else if(entryRegime == "range") {
+         } else if(entryRegime == "trend_weak") {
+            // Weak trend: slightly tighter than full trend
+            partialRatio = (TrendPartialTP + RangePartialTP) / 2.0;
+            beMulti = (TrendBEMulti + RangeBEMulti) / 2.0;
+            trailMulti = (TrendTrailMulti + RangeTrailMulti) / 2.0;
+         } else if(entryRegime == "range" || entryRegime == "high_vol_range") {
             partialRatio = RangePartialTP; beMulti = RangeBEMulti; trailMulti = RangeTrailMulti;
          } else {
             partialRatio = HVPartialTP; beMulti = HVBEMulti; trailMulti = HVTrailMulti;
